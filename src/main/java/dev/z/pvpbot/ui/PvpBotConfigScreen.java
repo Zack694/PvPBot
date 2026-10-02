@@ -413,6 +413,12 @@ public final class PvpBotConfigScreen extends Screen {
 
                 section("Pure mode (v2 brain)", 0xFFB48CFF);
                 toggle("Pure mode", tipOf(BotTooltips.PURE_MODE), c -> c.pureMode, (c, v) -> PvpBot.get().controller().setPureMode(v));
+                toggle("Jump discipline", "Pure brain jumps only for a reason: a jump reset (just got hit), a timed crit (sword 30-65% charged at take-off so it is full on the way down) or a long chase (6+ blocks). Stops the constant hopping and wasted mid-air hits.",
+                                c -> c.pureJumpDiscipline, (c, v) -> c.pureJumpDiscipline = v);
+                toggle("Combo orbit", "While the pure brain's combo is running (it landed the last hit), forward moves become a sprint-strafe orbit (W+A / W+D, flipping sides every 0.3-0.6 s, wall-aware). Keeps the combo going while being harder to hit back.",
+                                c -> c.pureComboOrbit, (c, v) -> c.pureComboOrbit = v);
+                toggle("Crit gate", "During its own timed crit jump the pure brain releases W in the air (sprint drops) and only clicks on the way down, so the hit is a real 1.5x crit instead of a rising mid-air hit.",
+                                c -> c.pureCritGate, (c, v) -> c.pureCritGate = v);
                 toggle("Immediate attack", tipOf(BotTooltips.PURE_IMMEDIATE), c -> c.pureImmediateAttack, (c, v) -> c.pureImmediateAttack = v);
                 islider("Retreat limit", "ticks", 0, 30, tipOf(BotTooltips.PURE_RETREAT), c -> c.pureRetreatLimit, (c, v) -> c.pureRetreatLimit = v);
                 islider("Aggression floor", "ticks", 0, 100, tipOf(BotTooltips.PURE_CLOSE), c -> c.pureCloseLimit, (c, v) -> c.pureCloseLimit = v);

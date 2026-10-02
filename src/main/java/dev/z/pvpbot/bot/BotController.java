@@ -185,6 +185,8 @@ public final class BotController {
         // credited for actions that never ran). Entries: {execTick, action, sneak}.
         private final java.util.ArrayDeque<long[]> pureDelay = new java.util.ArrayDeque<>();
         private long pureLastExecTick = -1;
+        private long pureCritUntilTick = -1;  // v2.3.4 crit gate window (own timed crit jump)
+        private int pureOrbitLeft = 0, pureOrbitDir = 0; // v2.3.4 combo orbit
         private int pureExecAction = 0;
         private boolean pureExecSneak = false;
 
@@ -915,7 +917,25 @@ public final class BotController {
                 // v2.2.0 PURE SPRINT-HIT LAW (forced sprint on every non-retreating,
                 // non-sneaking stance — a walking grounded click is a sweep)
                 boolean sprint = d.sprint || (cfg.sprintHitOnly && !back && !sneak);
-                int action = ActionSpace.encode(move, sprint, d.jump, false);
+                // v2.3.4 JUMP DISCIPLINE (user: "ALWAYS jumps to attack"). The jump
+                // flag is sticky, so once ON it hopped every time it landed. Jumps
+                // now need a reason: a jump reset (hit in the last 4 ticks), a
+                // TIMED crit (charge 30-65% at take-off, so it is full on the way
+                // down, 2-3.8 blocks) or a long chase (> 6 blocks). Sim A/B over
+                // 864 rounds: 62.5% -> 67.6% wins, own jumps 0.18/s -> 0.03/s.
+                boolean jump = d.jump;
+                if (cfg.pureJumpDiscipline && jump) {
+                        boolean resetOk = tickCounter - hits.lastTakenHitTick <= 4;
+                        float ch = self.getAttackCooldownProgress(0.0f);
+                        boolean critOk = ch >= 0.30f && ch <= 0.65f && distH >= 2.0 && distH <= 3.8;
+                        boolean chaseOk = distH > 6.0;
+                        if (!(resetOk || critOk || chaseOk)) {
+                                jump = false;
+                        } else if (critOk && !resetOk) {
+                                pureCritUntilTick = tickCounter + 18; // crit gate: no W up, click down
+                        }
+                }
+                int action = ActionSpace.encode(move, sprint, jump, false);
 
                 // v2.3 FIFO reaction delay: this decision executes after its
                 // human delay; nothing is dropped (see pureDelay).
@@ -935,7 +955,7 @@ public final class BotController {
                 lastV2State = state;
                 lastV2Move = move;
                 lastV2Sprint = sprint;
-                lastV2Jump = d.jump;
+                lastV2Jump = jump;
                 lastV2Sneak = sneak;
                 lastDecisionTick = tickCounter;
                 trainPulse();
@@ -949,6 +969,24 @@ public final class BotController {
          * move becomes a closing move. Neither fires while losing badly.
          */
         private int governPureMove(int move, ClientPlayerEntity self, LivingEntity target, double distH) {
+                // v2.3.4 COMBO ORBIT (user: "pure bot doesn't combo or strafe"): while
+                // our combo is running, forward moves become a sprint-strafe orbit
+                // (WA/WD, 6-12 tick holds, 60% side flip, wall-aware). Sim A/B: strafe
+                // share 39% -> 51% at an unchanged win rate.
+                if (cfg.pureComboOrbit && hits.comboDealt >= 1 && distH > 1.35 && distH < 3.4
+                                && (move == ActionSpace.M_W || move == ActionSpace.M_WA || move == ActionSpace.M_WD)) {
+                        if (pureOrbitLeft <= 0) {
+                                pureOrbitLeft = 6 + rng.nextInt(7);
+                                pureOrbitDir = pureOrbitDir == 0 ? (rng.nextBoolean() ? 1 : -1)
+                                                : (rng.nextFloat() < 0.6f ? -pureOrbitDir : pureOrbitDir);
+                        }
+                        pureOrbitLeft--;
+                        if (pureOrbitDir > 0 && (terrain.blocked[1] > 0.5f || terrain.blocked[2] > 0.5f)) pureOrbitDir = -1;
+                        else if (pureOrbitDir < 0 && (terrain.blocked[7] > 0.5f || terrain.blocked[6] > 0.5f)) pureOrbitDir = 1;
+                        move = pureOrbitDir > 0 ? ActionSpace.M_WD : ActionSpace.M_WA;
+                } else if (hits.comboDealt < 1) {
+                        pureOrbitLeft = 0;
+                }
                 boolean losingBadly = self.getHealth() < target.getHealth() - 4f;
                 float yawRad = (float) Math.toRadians(self.getYaw());
                 float fx = -MathHelper.sin(yawRad), fz = MathHelper.cos(yawRad);
@@ -1365,6 +1403,15 @@ public final class BotController {
                 // v2.3: the pure retreat governor + aggression floor moved to
                 // DECISION time (governPureMove) so the stored transition holds
                 // the move that really executes.
+                // v2.3.4 PURE CRIT GATE: during an own timed crit jump, release W
+                // in the air (sprint drops, so the falling hit is a real crit)
+                boolean pureCritAir = cfg.pureMode && cfg.pureCritGate && tickCounter <= pureCritUntilTick
+                                && !self.isOnGround();
+                if (pureCritAir) {
+                        move = move == ActionSpace.M_W ? ActionSpace.M_NONE
+                                        : move == ActionSpace.M_WA ? ActionSpace.M_A
+                                        : move == ActionSpace.M_WD ? ActionSpace.M_D : move;
+                }
                 actuator.setMove(move);
                 boolean wtapActive = wtapIsTapMove(move);
                 boolean backMove = move == ActionSpace.M_S || move == ActionSpace.M_SA
@@ -1389,6 +1436,7 @@ public final class BotController {
                 if (cfg.pureMode && cfg.sprintHitOnly && !wtapActive && !backMove && !pureExecSneak) {
                         sprintIntent = true;
                 }
+                if (pureCritAir) sprintIntent = false;
                 actuator.setSprint(sprintIntent);
                 if (cfg.pureMode) {
                         // v2.0.2 SNEAK GOVERNOR (user: "the Pure Model always shifts
@@ -1664,7 +1712,10 @@ public final class BotController {
                                                 // on the descent; an ascent hit is a plain hit and wastes
                                                 // the jump). MidAir (rising) hits are a separate window
                                                 // and unaffected — midAirChance keeps working.
-                                                if (tactics.critWindowActive() && self.getVelocity().y >= 0) {
+                                                boolean pureRising = cfg.pureMode && cfg.pureCritGate
+                                                                && tickCounter <= pureCritUntilTick
+                                                                && !self.isOnGround() && self.getVelocity().y >= 0;
+                                                if ((tactics.critWindowActive() && self.getVelocity().y >= 0) || pureRising) {
                                                         // airborne, still rising — wait for the fall
                                                 } else {
                                                         // v1.0.7: the sneak chance rolls HERE, at click time —
@@ -1872,6 +1923,8 @@ public final class BotController {
                 lastV2Expert = null;
                 lastV2LblMove = -1;
                 lastPureJumpTick = -1000;
+                pureCritUntilTick = -1;
+                pureOrbitLeft = 0;
                 pureBackStreak = 0;          // v2.2.2 retreat governor starts fresh
                 pureCloseStreak = 0;         // v2.2.1 aggression floor starts fresh
                 pureSneakHoldTicks = 0;      // v2.0.2

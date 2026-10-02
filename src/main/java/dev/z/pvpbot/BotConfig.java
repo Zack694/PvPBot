@@ -15,7 +15,7 @@ public final class BotConfig {
 
         // v2.2 tuning. MIGRATION: older saved configs keep their old values
         // on disk, so load() upgrades anything below configVersion 12.
-        public int configVersion = 14;
+        public int configVersion = 15;
 
         // ---- v2.2.0 AIM CALM (user: "still a bit wobbly even if Anti Wobble is
         //      set to max") — the master smoothness dial, 0 = raw tracking (old
@@ -218,6 +218,10 @@ public final class BotConfig {
         // v2.3.2 classic-stack counters (simulator-tested)
         public boolean comboBreaker = true;   // taken 2+ hits in a row -> sprint-strafe off their aim line
         public boolean critDenial = true;     // they jump in crit range -> hold reach edge, no crit trading
+        // v2.3.4 pure-mode jump discipline + crit gate (sim A/B tested)
+        public boolean pureJumpDiscipline = true;
+        public boolean pureCritGate = true;
+        public boolean pureComboOrbit = true;
 
         // ---- v2.1.0 VISION RECORDER (player-image dataset builder) ----
         // Captures auto-labeled crops of every visible player straight from the
@@ -377,7 +381,12 @@ public final class BotConfig {
          *  old on-disk values otherwise). v9 = v2.0 phase 1: threaded aim,
          *  practice-bot targeting, focus mode. */
         private static void migrate(BotConfig c) {
-                if (c.configVersion >= 14) return;
+                if (c.configVersion >= 15) return;
+                if (c.configVersion < 15) {
+                        c.pureJumpDiscipline = true;
+                        c.pureCritGate = true;
+                        c.pureComboOrbit = true;
+                }
                 if (c.configVersion < 14) {
                         c.comboBreaker = true;
                         c.critDenial = true;
@@ -451,7 +460,7 @@ public final class BotConfig {
                         c.pureShaping = true;
                         c.visionRecord = false;
                 }
-                c.configVersion = 14;
+                c.configVersion = 15;
                 c.save();
         }
 

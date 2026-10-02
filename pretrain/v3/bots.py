@@ -165,6 +165,9 @@ class LearnerCfg:
     win_reward = 45.0
     loss_reward = -10.0
     sneak_allowed = True
+    jump_discipline = True    # jumps only for jump resets, timed crits or long chases
+    crit_gate = True          # own crit jump: no W in the air, click on the descent
+    combo_orbit = True        # after landing a hit: WA/WD orbit instead of straight W
 
 
 class LearnerCtl:
@@ -328,9 +331,26 @@ class LearnerCtl:
             move = 6 if self.cb_dir > 0 else 5
         else:
             self.cb_left = 0
+        if cfg.combo_orbit and self.combo_dealt >= getattr(cfg, "orbit_min_combo", 1) and 1.35 < dh < 3.4 and move in (1, 5, 6) \
+                and (not getattr(cfg, "orbit_keep_diag", False) or move == 1):
+            if getattr(self, "orbit_left", 0) <= 0:
+                self.orbit_left = 6 + int(self.rng.integers(0, 7))
+                d0 = getattr(self, "orbit_dir", 0)
+                self.orbit_dir = (1 if self.rng.random() < 0.5 else -1) if d0 == 0 else (-d0 if self.rng.random() < 0.6 else d0)
+            self.orbit_left -= 1
+            move = 6 if self.orbit_dir > 0 else 5
         sneak = cfg.sneak_allowed and head["sneak"] and head["sneak_margin"] >= 0.25
         sprint = head["sprint"] or (move not in BACK_MOVES and not sneak)
         jump = head["jump"]
+        if cfg.jump_discipline and jump:
+            reset_ok = t - self.last_taken_tick <= 4
+            ch = me.charge(0.0)
+            crit_ok = 0.30 <= ch <= 0.65 and 2.0 <= dh <= 3.8
+            chase_ok = dh > 6.0
+            if not (reset_ok or crit_ok or chase_ok):
+                jump = False
+            elif crit_ok and not reset_ok and cfg.crit_gate:
+                self.crit_until = t + 18
         act = (move, sprint, jump, sneak)
 
         # FIFO reaction delay line (no decision is ever dropped)
@@ -374,6 +394,9 @@ class LearnerCtl:
         if self.jump_hold > 0:
             self.jump_hold -= 1
         fwd, right = MOVE_VEC[move]
+        if self.cfg.crit_gate and t <= getattr(self, "crit_until", -1) and not me.on_ground:
+            fwd = 0          # no W in the air: sprint drops, so the descending hit can crit
+            sprint = False
         return fwd, right, jump_key, sprint, sneak_on
 
     def try_click(self, t, me, view, world, click_due, desire, mature):
@@ -393,6 +416,8 @@ class LearnerCtl:
         gate = t - self.last_attack_attempt >= 2 + int(self.rng.integers(0, 2))
         if not (charge >= self.next_band and gate):
             return False
+        if cfg.crit_gate and t <= getattr(self, "crit_until", -1) and not me.on_ground and me.vy >= 0:
+            return False     # rising: wait for the fall (crit)
         sneak_click = self.exec[3]
         if me.on_ground and not me.sprinting and not sneak_click and not self.sprint_bypass:
             self.no_sprint_ticks += 1

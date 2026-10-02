@@ -322,10 +322,39 @@ def train_step_v1(model, target, opt, rb, cfg, beta):
     return float(loss.item()), 0.0, 0.0, float(td.abs().mean().item())
 
 
+# v2.3.4 LEFT/RIGHT MIRROR AUGMENTATION (ObsV4 layout). The game is mirror-
+# symmetric; the brain had learned a one-sided strafe (A 13%, D 0%).
+MIRROR_NEG = [9, 17, 24, 26, 35, 49, 54, 56, 64, 79]
+MIRROR_SWAP = [(84, 90), (85, 89), (86, 88)]          # terrain probes 1<->7, 2<->6, 3<->5
+MIRROR_MOVE = np.array([0, 1, 2, 4, 3, 6, 5, 8, 7], dtype=np.int64)
+
+
+def mirror_batch(b, frac=0.5):
+    n = len(b["R"])
+    k = np.random.random(n) < frac
+    if not k.any():
+        return b
+    out = {key: v.copy() for key, v in b.items()}
+    for key in ("s", "s2"):
+        x = out[key]
+        x[np.ix_(k, MIRROR_NEG)] *= -1.0
+        for i, j in MIRROR_SWAP:
+            xi = x[k, i].copy()
+            x[k, i] = x[k, j]
+            x[k, j] = xi
+    mv = out["move"].astype(np.int64)
+    mv[k] = MIRROR_MOVE[mv[k]]
+    out["move"] = mv.astype(np.int8)
+    out["aim"][k, 0] *= -1.0
+    return out
+
+
 def train_step(model, target, opt, rb, cfg, beta):
     if cfg.get("brain", "v2") == "v1":
         return train_step_v1(model, target, opt, rb, cfg, beta)
     idx, b, w = rb.sample(cfg["batch"], beta)
+    if cfg.get("mirror", True):
+        b = mirror_batch(b)
     s = torch.from_numpy(b["s"])
     s2 = torch.from_numpy(b["s2"])
     move = torch.from_numpy(b["move"].astype(np.int64))
