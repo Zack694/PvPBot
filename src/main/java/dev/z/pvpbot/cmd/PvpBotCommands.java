@@ -382,6 +382,13 @@ public final class PvpBotCommands {
         }
 
         private static void send(FabricClientCommandSource src, String msg) {
-                src.sendFeedback(Text.literal("[PvPBot] " + msg));
+                // v2.3: several replies come from the background worker — chat must
+                // only be touched on the client thread (ChatHud lists are not thread-safe)
+                net.minecraft.client.MinecraftClient mc = net.minecraft.client.MinecraftClient.getInstance();
+                if (mc.isOnThread()) {
+                        src.sendFeedback(Text.literal("[PvPBot] " + msg));
+                } else {
+                        mc.execute(() -> src.sendFeedback(Text.literal("[PvPBot] " + msg)));
+                }
         }
 }

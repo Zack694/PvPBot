@@ -194,6 +194,10 @@ public final class CombatTactics {
                         chance = Math.min(1f, chance * adapt.wtapMult());
                 }
                 if (deterministic) {
+                        // v2.3: at 1.0 the swing path (onMySwing) already opened this
+                        // tap on the click tick — the damage confirmation 1-3 ticks
+                        // later must not restart it (S was held too long, count x2)
+                        if (wtapTicksLeft > 0 || tick - lastWtapTick < 6) return;
                         startTap(tick, WV_S); // v1.0.10: 1.0 = always STRAIGHT S
                         return;
                 }
@@ -440,16 +444,9 @@ public final class CombatTactics {
          */
         public int movePolicy(int dqnMove, ClientPlayerEntity self, LivingEntity target,
                               long tick, double horizontalDist, int comboDealt, boolean activeTrade) {
-                // ---- jump reset firing window (the ONLY non-attack jump in melee)
-                if (jumpResetAtTick > 0 && tick >= jumpResetAtTick) {
-                        if (tick - jumpResetAtTick <= 2 && self.isOnGround()
-                                        && tick - lastJumpResetTick >= 4) {
-                                // actuator press handled by BotController via pollJumpReset()
-                                lastJumpResetTick = tick;
-                                jumpResetCount++;
-                        }
-                        jumpResetAtTick = -1;
-                }
+                // v2.3: the jump-reset window is consumed by pollJumpReset() (the
+                // controller's jump section) — movePolicy used to clear it first,
+                // so the jump reset NEVER pressed jump while the HUD counted it.
 
                 // ---- v1.0.9 chase model update (velocity EMA + band decision) —
                 // runs every tick so the prediction stays warm even when a higher-
@@ -487,7 +484,11 @@ public final class CombatTactics {
                         backoffRelease = Math.max(1.8f, Math.min(2.6f, backoffRelease * adapt.spacingMult()));
                 }
                 if (cfg.backoffEnabled) {
-                        if (!backoffActive && horizontalDist < cfg.tooCloseDist) {
+                        // v2.3: a capped-out backoff can no longer re-arm on the very
+                        // next tick (a rusher kept the bot backpedalling forever with
+                        // a 1-tick gap every 25 ticks) — 20 ticks of rest first.
+                        if (!backoffActive && horizontalDist < cfg.tooCloseDist
+                                        && tick - lastBackoffEndTick >= 20) {
                                 backoffActive = true;
                                 backoffStartTick = tick;
                                 backoffCount++;
@@ -495,13 +496,17 @@ public final class CombatTactics {
                                         && (horizontalDist >= backoffRelease
                                         || tick - backoffStartTick > Math.max(6, cfg.maxBackoffTicks))) {
                                 backoffActive = false;
+                                lastBackoffEndTick = tick;
                         }
                 }
 
                 if (backoffActive) {
                         // diagonal ARC retreat; curve around a wall behind instead
                         // of backing straight into it, with a re-close step in the mix
-                        int mv = BACKOFF_ARC[++backoffWobble % BACKOFF_ARC.length];
+                        // v2.3: each arc segment is held 4 ticks (it flipped SA/SD every
+                        // tick before — a visible A/D jitter instead of an arc)
+                        backoffWobble = (int) ((tick - backoffStartTick) / 4);
+                        int mv = BACKOFF_ARC[backoffWobble % BACKOFF_ARC.length];
                         if (mv == ActionSpace.M_S && (blocked[3] > 0.5f || blocked[4] > 0.5f || blocked[5] > 0.5f)) {
                                 mv = backoffWobble % 2 == 0 ? ActionSpace.M_WA : ActionSpace.M_WD;
                         }
@@ -649,9 +654,25 @@ public final class CombatTactics {
                                 && cfg.jumpResetEnabled;
         }
 
-        /** @return true if a jump-reset press is pending for this exact tick. */
-        public boolean pollJumpReset(long tick) {
-                return jumpResetAtTick == tick;
+        /**
+         * v2.3: jump-reset trigger. Fires on the first tick at/after the scheduled
+         * time (configured 100-150 ms after the hit) on which we can jump. A
+         * grounded knockback launches us (vy 0.4), so the old "grounded exactly
+         * on the scheduled tick" rule almost never held — the press now waits
+         * for the landing inside a 12-tick window (jump-on-landing breaks the
+         * follow-up combo) and is counted only when it really fires.
+         */
+        public boolean pollJumpReset(long tick, boolean canJump) {
+                if (jumpResetAtTick <= 0 || tick < jumpResetAtTick) return false;
+                if (tick - jumpResetAtTick > 12) {
+                        jumpResetAtTick = -1;
+                        return false;
+                }
+                if (!canJump || tick - lastJumpResetTick < 4) return false;
+                jumpResetAtTick = -1;
+                lastJumpResetTick = tick;
+                jumpResetCount++;
+                return true;
         }
 
         // ---- attack techniques -------------------------------------------------
@@ -660,6 +681,8 @@ public final class CombatTactics {
         // 1 = lunge/crit intent (jump + engage sooner), -1 = reset/space intent
         // (no technique jumps), 0 = neutral.
         public int aggressionHint = 0;
+
+        private long lastBackoffEndTick = -1000; // v2.3: backoff re-arm cooldown
 
         /** Physical eligibility shared by the crit attempt paths. */
         private boolean critEligible(long tick) {
@@ -836,6 +859,7 @@ public final class CombatTactics {
                 sneakTicksLeft = 0;
                 sneakJumpPending = false;
                 backoffActive = false;
+                lastBackoffEndTick = -1000;
                 midAirAttackUntilTick = -1;
                 escapeTicksLeft = 0;
                 idleInReachTicks = 0;

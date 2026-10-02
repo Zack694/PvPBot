@@ -20,6 +20,16 @@ public interface MouseAccessor {
         @Accessor("y")
         double pvpbot$y();
 
+        // v2.3: setters so the injected cursor position can be put back —
+        // onCursorPos stores the injected x/y, and GLFW's real cursor never
+        // moved, so the NEXT real (or launcher-emitted) cursor event produced
+        // a delta that undid every degree the bot had turned.
+        @Accessor("x")
+        void pvpbot$setX(double x);
+
+        @Accessor("y")
+        void pvpbot$setY(double y);
+
         @Invoker("onCursorPos")
         void pvpbot$onCursorPos(long window, double x, double y);
 }

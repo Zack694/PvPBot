@@ -1,56 +1,44 @@
 package dev.z.pvpbot.ui;
 
-import dev.z.pvpbot.BotConfig;
 import dev.z.pvpbot.PvpBot;
 import dev.z.pvpbot.bot.BotController;
 import dev.z.pvpbot.bot.FocusMode;
-import dev.z.pvpbot.ml.Dqn;
 import dev.z.pvpbot.ml.ModelStore;
 import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
-import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.text.Text;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * v2.0 PHASE 1 — CLICKGUI on RIGHT CONTROL (user: "a ClickGui on Right
- * Control where I can open configs, Model Presets in future, Train/Stop and
- * Human-Train/Stop as big buttons").
- *
- * Four tabs across the top of a panel:
- *   HOME    — the big training buttons: START/STOP TRAINING (auto re-engage
- *             episode loop), HUMAN-TRAIN/STOP (imitation from your play),
- *             ENGAGE/DISENGAGE (normal takeover), plus a live status line.
- *   CONFIG  — opens the full config screen (every setting + tooltips).
- *   MODELS  — the brain the mod currently runs + swap controls (fills up in
- *             Phase 2 with the models/ folder + picker).
- *   PRESETS — reserved slot for saveable configuration bundles (Phase 3+).
- *
- * The bot auto-pauses while any screen is open, so mashing buttons mid-fight
- * is safe: keys release, the round state stays intact.
+ * v2.3 — ClickGUI on RIGHT CONTROL, fully custom-drawn (no Minecraft
+ * buttons). Tabs: CONTROL (big session buttons + live stats), MODELS
+ * (snapshot / hot-swap / delete), SETTINGS (opens the config + HUD editor).
+ * Keys 1-3 switch tabs. The bot auto-pauses while any screen is open.
  */
 public final class PvpBotClickGui extends Screen {
 
-        private static final int PANEL_W = 260;
-        private static final int PANEL_H = 186;
-        private static final String[] TABS = {"HOME", "CONFIG", "MODELS", "PRESETS"};
+        private static final String[] TABS = {"Control", "Models", "Settings"};
 
         private final Screen parent;
         private int tab = 0;
-        // v2.2.1: copy-on-write — worker threads write toasts while the render
-        // thread iterates (a plain ArrayList risked ConcurrentModificationException
-        // on every IL/snapshot button).
-        private final java.util.concurrent.CopyOnWriteArrayList<String> toast =
-                        new java.util.concurrent.CopyOnWriteArrayList<>();
+        private float tabAnim = 0f;
+        private float openAnim = 0f;
+        private long lastFrameMs = 0L;
+        private final java.util.concurrent.CopyOnWriteArrayList<String> toast = new java.util.concurrent.CopyOnWriteArrayList<>();
+        private long toastMs = 0L;
 
-        // v2.0 PHASE 2-a — model picker state (MODELS tab)
         private List<ModelStore.ModelInfo> models = new ArrayList<>();
         private int modelScroll = 0;
-        private static final int VISIBLE_MODELS = 4;
-        private static final int ROW_H = 15;
+
+        /** A custom button, rebuilt every frame from the current state. */
+        private record Btn(String id, int x, int y, int w, int h, String label, int color, Runnable action) {
+        }
+
+        private final List<Btn> buttons = new ArrayList<>();
+        private final java.util.Map<String, Float> hover = new java.util.HashMap<>();
 
         public PvpBotClickGui(Screen parent) {
                 super(Text.literal("PvPBot Control"));
@@ -59,278 +47,221 @@ public final class PvpBotClickGui extends Screen {
 
         @Override
         protected void init() {
-                layoutButtons();
+                refreshModels();
         }
 
-        private void layoutButtons() {
-                clearChildren();
-                int px = (this.width - PANEL_W) / 2;
-                int py = Math.max(30, (this.height - PANEL_H) / 2 - 10);
+        private int pw() {
+                return Math.min(this.width - 16, 300);
+        }
 
-                if (tab == 0) {
-                        BotController ctl = PvpBot.get().controller();
-                        boolean training = ctl.isTrainingSession();
-                        boolean human = ctl.isHumanTraining();
-                        boolean engaged = ctl.isStarted() && !training && !human;
-                        addDrawableChild(ButtonWidget.builder(
-                                        Text.literal(training ? "STOP TRAINING" : "START TRAINING"),
-                                        b -> {
-                                                if (ctl.isTrainingSession()) ctl.stop();
-                                                else ctl.startTraining();
-                                                layoutButtons();
-                                        })
-                                .dimensions(px + 14, py + 30, 232, 30).build());
-                        addDrawableChild(ButtonWidget.builder(
-                                        Text.literal(human ? "STOP HUMAN-TRAIN" : "START HUMAN-TRAIN"),
-                                        b -> {
-                                                if (ctl.isHumanTraining()) ctl.stop();
-                                                else ctl.startHumanTrain();
-                                                layoutButtons();
-                                        })
-                                .dimensions(px + 14, py + 66, 232, 30).build());
-                        addDrawableChild(ButtonWidget.builder(
-                                        Text.literal(engaged ? "DISENGAGE BOT" : "ENGAGE BOT"),
-                                        b -> {
-                                                ctl.toggle();
-                                                layoutButtons();
-                                        })
-                                .dimensions(px + 14, py + 102, 112, 20).build());
-                        addDrawableChild(ButtonWidget.builder(
-                                        Text.literal(FocusMode.isActive() ? "FOCUS: ON" : "FOCUS: OFF"),
-                                        b -> {
-                                                FocusMode.toggle(this.client);
-                                                layoutButtons();
-                                        })
-                                .dimensions(px + 134, py + 102, 112, 20).build());
-                        // v2.0 PHASE 2-b — PURE MODE: the four-head brain is the only
-                        // authority (movement/sprint/jump/sneak/aim/click). The v1.0.12
-                        // physics gates (band, governor, on-target) ALWAYS stay.
-                        addDrawableChild(ButtonWidget.builder(
-                                        Text.literal(PvpBot.get().config().pureMode ? "PURE MODE: ON" : "PURE MODE: OFF"),
-                                        b -> {
-                                                ctl.setPureMode(!PvpBot.get().config().pureMode);
-                                                layoutButtons();
-                                        })
-                                .dimensions(px + 14, py + 126, 232, 20).build());
-                } else if (tab == 1) {
-                        addDrawableChild(ButtonWidget.builder(
-                                        Text.literal("Open Full Config (all settings + tooltips)"),
-                                        b -> {
-                                                this.client.setScreen(new PvpBotConfigScreen(this, 0));
-                                        })
-                                .dimensions(px + 14, py + 30, 232, 20).build());
-                        addDrawableChild(ButtonWidget.builder(
-                                        Text.literal("Open HUD Layout Editor"),
-                                        b -> {
-                                                this.client.setScreen(new PvpBotHudEditScreen(this));
-                                        })
-                                .dimensions(px + 14, py + 56, 232, 20).build());
-                } else if (tab == 2) {
-                        // v2.0 PHASE 2-a — MODEL PICKER: save a snapshot of the live
-                        // brain + manage the models/ folder (click = hot-swap,
-                        // shift-click = delete)
-                        addDrawableChild(ButtonWidget.builder(
-                                        Text.literal("SAVE SNAPSHOT of current brain"),
-                                        b -> {
-                                                var c = PvpBot.get().controller();
-                                                String name = (c.config().pureMode ? "v2-ep" : "ep") + c.episodesDone + "-"
-                                                                + java.time.LocalTime.now()
-                                                                                .format(java.time.format.DateTimeFormatter.ofPattern("HHmmss"));
-                                                final PvpBot botRef = PvpBot.get();
-                                                final boolean v2 = c.config().pureMode;
-                                                PvpBot.worker().execute(() -> {
-                                                        try {
-                                                                String fn = v2 ? ModelStore.saveSnapshotV2(name, botRef)
-                                                                                : ModelStore.saveSnapshot(name, botRef);
-                                                                toast("Saved " + fn);
-                                                        } catch (Exception ex) {
-                                                                toast("Save failed: " + ex.getMessage());
-                                                        }
-                                                });
-                                                toast("Saving snapshot…");
-                                        })
-                                .dimensions(px + 14, py + 34, 232, 20).build());
-                        addDrawableChild(ButtonWidget.builder(
-                                        Text.literal("REFRESH"),
-                                        b -> {
-                                                refreshModels();
-                                        })
-                                .dimensions(px + 14, py + 56, 112, 16).build());
-                        addDrawableChild(ButtonWidget.builder(
-                                        Text.literal("LOAD: click a model below"),
-                                        b -> {
-                                                refreshModels();
-                                                toast("Click a model row to hot-swap it in.");
-                                        })
-                                .dimensions(px + 134, py + 56, 112, 16).build());
-                        // v2.2.0 — IL (imitation-from-video) controls live here too:
-                        // load the extractor's sessions into both brains + train bursts.
-                        addDrawableChild(ButtonWidget.builder(
-                                        Text.literal("IL: LOAD SESSIONS"),
-                                        b -> {
-                                                final PvpBot botRef = PvpBot.get();
-                                                toast("Scanning config/pvpbot/il/ …");
-                                                PvpBot.worker().execute(() -> toast(dev.z.pvpbot.ml.ILStore.get().loadAll(botRef)));
-                                        })
-                                .dimensions(px + 14, py + 76, 112, 16).build());
-                        addDrawableChild(ButtonWidget.builder(
-                                        Text.literal("IL: TRAIN 60"),
-                                        b -> {
-                                                dev.z.pvpbot.ml.ILStore il = dev.z.pvpbot.ml.ILStore.get();
-                                                if (!il.isLoaded()) {
-                                                        toast("IL not loaded — click IL: LOAD SESSIONS first");
-                                                } else {
-                                                        il.train(PvpBot.get(), 60);
-                                                        toast("IL training queued (60 bursts)");
-                                                }
-                                        })
-                                .dimensions(px + 134, py + 76, 112, 16).build());
-                        refreshModels();
-                }
+        private int ph() {
+                return Math.min(this.height - 16, 236);
+        }
+
+        private int px() {
+                return (this.width - pw()) / 2;
+        }
+
+        private int py() {
+                return (this.height - ph()) / 2;
+        }
+
+        // ================================================================ render
+
+        @Override
+        public void renderBackground(DrawContext c, int mouseX, int mouseY, float delta) {
+                c.fillGradient(0, 0, this.width, this.height, 0x90060810, 0xC0080B14);
         }
 
         @Override
-        public void render(DrawContext ctx, int mouseX, int mouseY, float delta) {
-                ctx.fill(0, 0, this.width, this.height, 0x88000000);
-                int px = (this.width - PANEL_W) / 2;
-                int py = Math.max(30, (this.height - PANEL_H) / 2 - 10);
-                var tr = this.textRenderer;
+        public void render(DrawContext c, int mouseX, int mouseY, float delta) {
+                long now = System.currentTimeMillis();
+                if (lastFrameMs == 0L) lastFrameMs = now;
+                float dt = Math.min(0.1f, (now - lastFrameMs) / 1000f);
+                lastFrameMs = now;
+                openAnim = Gfx.approach(openAnim, 1f, dt, 10f);
+                tabAnim = Gfx.approach(tabAnim, tab, dt, 16f);
 
-                // panel
-                ctx.fill(px, py, px + PANEL_W, py + PANEL_H, 0xF0101018);
-                ctx.fill(px, py, px + PANEL_W, py + 1, 0xFF3D7BFF);
-                ctx.fill(px, py + 1, px + PANEL_W, py + 16, 0xFF16203A);
-
-                // tabs
-                int tabW = PANEL_W / TABS.length;
-                for (int i = 0; i < TABS.length; i++) {
-                        int tx = px + i * tabW;
-                        boolean sel = i == tab;
-                        ctx.fill(tx + 1, py + 17, tx + tabW - 1, py + 31, sel ? 0xFF2C4E8E : 0xFF101B33);
-                        ctx.drawCenteredTextWithShadow(tr, Text.literal(TABS[i]),
-                                        tx + tabW / 2, py + 21, sel ? 0xFFFFFF : 0xFF8899BB);
-                }
-
-                // tab content text
+                int px = px(), py = py() + (int) ((1f - openAnim) * 10), pw = pw(), ph = ph();
+                Gfx.shadow(c, px, py, pw, ph);
+                Gfx.card(c, px, py, pw, ph, Gfx.BG, Gfx.BORDER);
+                c.fillGradient(px + 1, py + 1, px + pw - 1, py + 3, Gfx.ACCENT, Gfx.ACCENT_2);
+                Gfx.text(c, textRenderer, "PvPBot", px + 12, py + 11, 0xFFFFFFFF);
                 BotController ctl = PvpBot.get().controller();
-                int cy = py + 38;
+                String state = ctl.isHumanTraining() ? "HUMAN-TRAIN" : ctl.isTrainingSession() ? "TRAINING"
+                                : ctl.isStarted() ? "ENGAGED" : "IDLE";
+                int stCol = ctl.isStarted() ? Gfx.GOOD : Gfx.DIM;
+                int sw = textRenderer.getWidth(state) + 12;
+                Gfx.round(c, px + pw - 12 - sw, py + 8, sw, 14, Gfx.alpha(stCol, 0.25f));
+                Gfx.textCentered(c, textRenderer, state, px + pw - 12 - sw / 2, py + 11, stCol);
+
+                // tabs (sliding indicator)
+                int tx = px + 10, ty = py + 28, tw = (pw - 20) / TABS.length;
+                Gfx.round(c, tx, ty, pw - 20, 18, Gfx.SURFACE);
+                Gfx.round(c, tx + (int) (tabAnim * tw) + 1, ty + 1, tw - 2, 16, Gfx.SURFACE_HOVER);
+                for (int i = 0; i < TABS.length; i++) {
+                        Gfx.textCentered(c, textRenderer, TABS[i], tx + i * tw + tw / 2, ty + 5,
+                                        i == tab ? 0xFFFFFFFF : Gfx.MUTED);
+                }
+
+                buttons.clear();
+                int cy = py + 54;
                 if (tab == 0) {
-                        String status;
-                        if (ctl.isHumanTraining()) status = "HUMAN-TRAIN: your fights are recorded as expert demos";
-                        else if (ctl.isTrainingSession()) status = "TRAINING: auto re-engage, brain updates every round";
-                        else if (ctl.isStarted()) status = "ENGAGED: fighting";
-                        else status = "IDLE";
-                        ctx.drawText(tr, Text.literal(status), px + 14, py + 128, 0xFF9FE870, true);
-                        Dqn dqn = PvpBot.get().dqn();
-                        String line2 = String.format("eps %d  W/L/D %d/%d/%d  replay %d/%d  demos %d",
-                                        ctl.episodesDone, ctl.wins, ctl.losses, ctl.draws,
-                                        dqn.bufferSize(), dqn.bufferCapacity(), dqn.expertSize());
-                        ctx.drawText(tr, Text.literal(line2), px + 14, py + 140, 0xFFAABBDD, true);
-                        ctx.drawText(tr, Text.literal("curriculum " + ctl.curriculumPhase()
-                                        + String.format("  eps-greedy %.2f", ctl.epsilon())),
-                                        px + 14, py + 152, 0xFF8899BB, true);
+                        renderControl(c, ctl, px, cy, pw);
                 } else if (tab == 1) {
-                        ctx.drawText(tr, Text.literal("Every slider, chance and timing lives in the"),
-                                        px + 14, py + 84, 0xFFAABBDD, true);
-                        ctx.drawText(tr, Text.literal("full config screen — hover anything for help."),
-                                        px + 14, py + 96, 0xFFAABBDD, true);
-                } else if (tab == 2) {
-                        Dqn dqn = PvpBot.get().dqn();
-                        String active = PvpBot.get().activeModelName();
-                        ctx.drawText(tr, Text.literal("Active brain: " + (active != null ? active : "autosave (model/policy.json)")),
-                                        px + 14, py + 40, 0xFF9FE870, true);
-                        ctx.drawText(tr, Text.literal("arch " + dqn.qArchSummary() + "   steps " + dqn.getTrainSteps()),
-                                        px + 14, py + 52, 0xFFAABBDD, true);
-                        // v2.2.0: live IL pipeline status
-                        ctx.drawText(tr, Text.literal(dev.z.pvpbot.ml.ILStore.get().statusLine()),
-                                        px + 14, py + 68, 0xFFBBD4FF, true);
-                        // model rows (4 visible, scroll with the wheel)
-                        int listY = py + 96;
-                        ctx.fill(px + 12, listY - 2, px + PANEL_W - 12, listY + VISIBLE_MODELS * ROW_H + 2, 0xFF060A14);
-                        if (models.isEmpty()) {
-                                ctx.drawText(tr, Text.literal("models/ is empty — save a snapshot first"),
-                                                px + 16, listY + 20, 0xFF667799, true);
-                        }
-                        for (int i = 0; i < VISIBLE_MODELS; i++) {
-                                int idx = modelScroll + i;
-                                if (idx >= models.size()) break;
-                                ModelStore.ModelInfo m = models.get(idx);
-                                boolean isActive = m.fileName.equals(active);
-                                int rowY = listY + i * ROW_H;
-                                if (isActive) {
-                                        ctx.fill(px + 13, rowY, px + PANEL_W - 13, rowY + ROW_H - 1, 0xFF1B3320);
-                                }
-                                ctx.drawText(tr, Text.literal(m.fileName), px + 16, rowY + 1,
-                                                isActive ? 0xFF7DFFA0 : 0xFFCCDDEE, true);
-                                ctx.drawText(tr, Text.literal(m.statsLine()), px + 16, rowY + 8,
-                                                0xFF7788AA, true);
-                        }
-                        ctx.drawText(tr, Text.literal("CLICK = hot-swap (replay + demos kept)   SHIFT+CLICK = delete"),
-                                        px + 14, py + 174, 0xFFFFDD77, true);
+                        renderModels(c, px, cy, pw, mouseX, mouseY);
                 } else {
-                        ctx.drawText(tr, Text.literal("PRESETS — saveable config bundles per model."),
-                                        px + 14, py + 60, 0xFFFFDD77, true);
-                        ctx.drawText(tr, Text.literal("Reserved slot: the picker lands first (Phase 2),"),
-                                        px + 14, py + 72, 0xFFAABBDD, true);
-                        ctx.drawText(tr, Text.literal("then presets bind a config + a brain together."),
-                                        px + 14, py + 84, 0xFFAABBDD, true);
+                        renderSettings(c, px, cy, pw);
                 }
 
-                // title
-                ctx.drawCenteredTextWithShadow(tr, Text.literal("PvPBot Control"),
-                                this.width / 2, py - 12, 0xFF55AAFF);
-
-                for (int i = 0; i < toast.size(); i++) {
-                        ctx.drawCenteredTextWithShadow(tr, Text.literal(toast.get(i)),
-                                        this.width / 2, py + PANEL_H + 8 + i * 10, 0xFF55FF55);
+                for (Btn b : buttons) {
+                        boolean h = Gfx.in(mouseX, mouseY, b.x, b.y, b.w, b.h);
+                        float hv = Gfx.approach(hover.getOrDefault(b.id, 0f), h ? 1f : 0f, dt, 16f);
+                        hover.put(b.id, hv);
+                        Gfx.button(c, textRenderer, b.x, b.y, b.w, b.h, b.label, b.color, hv, true);
                 }
-                super.render(ctx, mouseX, mouseY, delta);
+
+                if (!toast.isEmpty() && now - toastMs < 4000) {
+                        String t = textRenderer.trimToWidth(toast.get(0), pw - 24);
+                        int w = textRenderer.getWidth(t) + 16;
+                        Gfx.round(c, this.width / 2 - w / 2, py + ph + 6, w, 16, 0xE0182233);
+                        Gfx.textCentered(c, textRenderer, t, this.width / 2, py + ph + 10, Gfx.GOOD);
+                }
         }
+
+        private void renderControl(DrawContext c, BotController ctl, int px, int y, int pw) {
+                int x = px + 12, w = pw - 24;
+                boolean training = ctl.isTrainingSession(), human = ctl.isHumanTraining();
+                boolean engaged = ctl.isStarted() && !training && !human;
+                buttons.add(new Btn("train", x, y, w, 24, training ? "Stop training" : "Start training",
+                                training ? 0xFF7A2E3C : 0xFF2F5BD1, () -> {
+                                        if (ctl.isTrainingSession()) ctl.stop();
+                                        else ctl.startTraining();
+                                }));
+                buttons.add(new Btn("human", x, y + 28, w, 24, human ? "Stop human-train" : "Start human-train",
+                                human ? 0xFF7A2E3C : 0xFF27795A, () -> {
+                                        if (ctl.isHumanTraining()) ctl.stop();
+                                        else ctl.startHumanTrain();
+                                }));
+                int hw = (w - 4) / 2;
+                buttons.add(new Btn("engage", x, y + 56, hw, 20, engaged ? "Disengage" : "Engage",
+                                engaged ? 0xFF6E3A2A : Gfx.SURFACE_HI, ctl::toggle));
+                buttons.add(new Btn("focus", x + hw + 4, y + 56, hw, 20, FocusMode.isActive() ? "Focus: on" : "Focus: off",
+                                FocusMode.isActive() ? 0xFF5E4A1F : Gfx.SURFACE_HI, () -> FocusMode.toggle(this.client)));
+                boolean pure = PvpBot.get().config().pureMode;
+                buttons.add(new Btn("pure", x, y + 80, w, 20, pure ? "Brain: PURE v2 (click for classic v1)" : "Brain: CLASSIC v1 (click for pure v2)",
+                                pure ? 0xFF4B2F86 : 0xFF23406E, () -> ctl.setPureMode(!PvpBot.get().config().pureMode)));
+
+                int sy = y + 108;
+                Gfx.round(c, x, sy, w, 52, Gfx.SURFACE);
+                Gfx.text(c, textRenderer, String.format("Episodes %d   W %d  L %d  D %d", ctl.episodesDone, ctl.wins, ctl.losses, ctl.draws),
+                                x + 8, sy + 6, Gfx.TEXT);
+                Gfx.text(c, textRenderer, String.format("Exploration %.2f   %s", ctl.epsilon(), ctl.curriculumPhase()),
+                                x + 8, sy + 18, Gfx.MUTED);
+                Gfx.text(c, textRenderer, textRenderer.trimToWidth(ctl.v2StatusLine(), w - 16), x + 8, sy + 30, Gfx.MUTED);
+                Gfx.text(c, textRenderer, "Right Ctrl closes · 1-3 switch tabs", x + 8, sy + 41, Gfx.DIM);
+        }
+
+        private void renderModels(DrawContext c, int px, int y, int pw, int mx, int my) {
+                int x = px + 12, w = pw - 24;
+                String active = PvpBot.get().activeModelName();
+                Gfx.text(c, textRenderer, textRenderer.trimToWidth("Active: " + (active != null ? active : "autosave"), w), x, y, Gfx.GOOD);
+                int hw = (w - 4) / 2;
+                buttons.add(new Btn("snap", x, y + 12, hw, 18, "Save snapshot", 0xFF2F5BD1, this::snapshot));
+                buttons.add(new Btn("refresh", x + hw + 4, y + 12, hw, 18, "Refresh", Gfx.SURFACE_HI, this::refreshModels));
+
+                int ly = y + 36, rowH = 22, visible = 4;
+                Gfx.round(c, x, ly, w, visible * rowH + 4, Gfx.SURFACE);
+                if (models.isEmpty()) {
+                        Gfx.textCentered(c, textRenderer, "No snapshots yet", x + w / 2, ly + 40, Gfx.DIM);
+                }
+                for (int i = 0; i < visible; i++) {
+                        int idx = modelScroll + i;
+                        if (idx >= models.size()) break;
+                        ModelStore.ModelInfo m = models.get(idx);
+                        int ry = ly + 2 + i * rowH;
+                        boolean isActive = m.fileName.equals(active);
+                        boolean h = Gfx.in(mx, my, x + 2, ry, w - 4, rowH - 2);
+                        if (isActive || h) Gfx.round(c, x + 2, ry, w - 4, rowH - 2, isActive ? 0xFF1C3A2E : Gfx.SURFACE_HOVER);
+                        Gfx.text(c, textRenderer, textRenderer.trimToWidth(m.fileName, w - 16), x + 8, ry + 2, isActive ? Gfx.GOOD : Gfx.TEXT);
+                        Gfx.text(c, textRenderer, textRenderer.trimToWidth(m.statsLine(), w - 16), x + 8, ry + 11, Gfx.DIM);
+                }
+                Gfx.text(c, textRenderer, "Click = hot-swap   Shift+click = delete   Wheel = scroll", x, ly + visible * rowH + 8, Gfx.DIM);
+                Gfx.text(c, textRenderer, textRenderer.trimToWidth(dev.z.pvpbot.ml.ILStore.get().statusLine(), w), x, ly + visible * rowH + 20, Gfx.MUTED);
+        }
+
+        private void renderSettings(DrawContext c, int px, int y, int pw) {
+                int x = px + 12, w = pw - 24;
+                buttons.add(new Btn("cfg", x, y, w, 24, "Open settings", 0xFF2F5BD1,
+                                () -> this.client.setScreen(new PvpBotConfigScreen(this, 0))));
+                buttons.add(new Btn("hud", x, y + 28, w, 24, "HUD layout editor", Gfx.SURFACE_HI,
+                                () -> this.client.setScreen(new PvpBotHudEditScreen(this))));
+                buttons.add(new Btn("il", x, y + 56, w, 20, "Load IL video sessions", 0xFF27795A, () -> {
+                        final PvpBot bot = PvpBot.get();
+                        toast("Scanning config/pvpbot/il/ …");
+                        PvpBot.worker().execute(() -> toast(dev.z.pvpbot.ml.ILStore.get().loadAll(bot)));
+                }));
+                Gfx.text(c, textRenderer, "Every setting has a hover explanation.", x, y + 86, Gfx.MUTED);
+                Gfx.text(c, textRenderer, "Right-click a setting to restore its default.", x, y + 98, Gfx.MUTED);
+        }
+
+        private void snapshot() {
+                var ctl = PvpBot.get().controller();
+                String name = (ctl.config().pureMode ? "v2-ep" : "ep") + ctl.episodesDone + "-"
+                                + java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HHmmss"));
+                final PvpBot bot = PvpBot.get();
+                final boolean v2 = ctl.config().pureMode;
+                toast("Saving snapshot…");
+                PvpBot.worker().execute(() -> {
+                        try {
+                                String fn = v2 ? ModelStore.saveSnapshotV2(name, bot) : ModelStore.saveSnapshot(name, bot);
+                                toast("Saved " + fn);
+                                refreshModels();
+                        } catch (Exception ex) {
+                                toast("Save failed: " + ex.getMessage());
+                        }
+                });
+        }
+
+        // ================================================================ input
 
         @Override
         public boolean mouseClicked(Click click, boolean doubled) {
-                int px = (this.width - PANEL_W) / 2;
-                int py = Math.max(30, (this.height - PANEL_H) / 2 - 10);
-                int mx = (int) click.x(), my = (int) click.y();
-                int tabW = PANEL_W / TABS.length;
-                if (my >= py + 17 && my < py + 31) {
-                        for (int i = 0; i < TABS.length; i++) {
-                                if (mx >= px + i * tabW + 1 && mx < px + (i + 1) * tabW - 1) {
-                                        if (tab != i) {
-                                                tab = i;
-                                                toast.clear();
-                                                layoutButtons();
-                                        }
-                                        return true;
-                                }
+                double mx = click.x(), my = click.y();
+                int px = px(), py = py(), pw = pw();
+                int tx = px + 10, ty = py + 28, tw = (pw - 20) / TABS.length;
+                if (Gfx.in(mx, my, tx, ty, pw - 20, 18)) {
+                        tab = Math.max(0, Math.min(TABS.length - 1, (int) ((mx - tx) / tw)));
+                        return true;
+                }
+                for (Btn b : new ArrayList<>(buttons)) {
+                        if (Gfx.in(mx, my, b.x, b.y, b.w, b.h)) {
+                                b.action.run();
+                                return true;
                         }
                 }
-                // v2.0 PHASE 2-a — model row clicks (LOAD / shift+DELETE)
-                if (tab == 2 && !models.isEmpty()) {
-                        int listY = py + 96;
-                        if (mx >= px + 12 && mx <= px + PANEL_W - 12
-                                        && my >= listY && my < listY + VISIBLE_MODELS * ROW_H) {
-                                int idx = modelScroll + (my - listY) / ROW_H;
+                if (tab == 1 && !models.isEmpty()) {
+                        int x = px + 12, w = pw - 24, ly = py + 54 + 36, rowH = 22;
+                        if (Gfx.in(mx, my, x, ly, w, 4 * rowH + 4)) {
+                                int idx = modelScroll + (int) ((my - ly - 2) / rowH);
                                 if (idx >= 0 && idx < models.size()) {
                                         ModelStore.ModelInfo m = models.get(idx);
-                                        final PvpBot botRef = PvpBot.get();
+                                        final PvpBot bot = PvpBot.get();
                                         if ((click.modifiers() & org.lwjgl.glfw.GLFW.GLFW_MOD_SHIFT) != 0) {
                                                 PvpBot.worker().execute(() -> {
                                                         try {
                                                                 ModelStore.delete(m.fileName);
+                                                                refreshModels();
                                                         } catch (Exception ex) {
-                                                                LOGGER_DELETE_WARN(ex);
+                                                                PvpBot.LOGGER.warn("[pvpbot] model delete failed: {}", ex.toString());
                                                         }
                                                 });
                                                 toast("Deleted " + m.fileName);
-                                                refreshModels();
                                         } else {
                                                 toast("Loading " + m.fileName + "…");
                                                 PvpBot.worker().execute(() -> {
                                                         try {
-                                                                String d = ModelStore.loadInto(
-                                                                                ModelStore.dir().resolve(m.fileName), botRef);
-                                                                toast("Hot-swapped: " + d);
+                                                                toast("Hot-swapped: " + ModelStore.loadInto(ModelStore.dir().resolve(m.fileName), bot));
                                                         } catch (Exception ex) {
                                                                 toast("Load failed: " + ex.getMessage());
                                                         }
@@ -345,50 +276,42 @@ public final class PvpBotClickGui extends Screen {
 
         @Override
         public boolean mouseScrolled(double mouseX, double mouseY, double horizontal, double vertical) {
-                if (tab == 2 && models.size() > VISIBLE_MODELS) {
-                        modelScroll = Math.max(0, Math.min(models.size() - VISIBLE_MODELS,
-                                        modelScroll - (int) Math.signum(vertical)));
+                if (tab == 1 && models.size() > 4) {
+                        modelScroll = Math.max(0, Math.min(models.size() - 4, modelScroll - (int) Math.signum(vertical)));
                         return true;
                 }
                 return super.mouseScrolled(mouseX, mouseY, horizontal, vertical);
         }
 
-        private void refreshModels() {
-                models = ModelStore.list();
-                if (modelScroll > Math.max(0, models.size() - VISIBLE_MODELS)) {
-                        modelScroll = Math.max(0, models.size() - VISIBLE_MODELS);
-                }
-        }
-
-        private static void LOGGER_DELETE_WARN(Exception ex) {
-                dev.z.pvpbot.PvpBot.LOGGER.warn("[pvpbot] model delete failed: {}", ex.toString());
-        }
-
-        private void toast(String msg) {
-                toast.clear();
-                toast.add(msg);
-        }
-
         @Override
         public boolean keyPressed(net.minecraft.client.input.KeyInput input) {
-                // the tabs are mouse-only; make 1-4 switch them from the keyboard too
-                int keyCode = input.key();
-                if (keyCode >= org.lwjgl.glfw.GLFW.GLFW_KEY_1
-                                && keyCode <= org.lwjgl.glfw.GLFW.GLFW_KEY_4) {
-                        int t = keyCode - org.lwjgl.glfw.GLFW.GLFW_KEY_1;
-                        if (t != tab) {
-                                tab = t;
-                                toast.clear();
-                                layoutButtons();
-                        }
+                int k = input.key();
+                if (k >= org.lwjgl.glfw.GLFW.GLFW_KEY_1 && k <= org.lwjgl.glfw.GLFW.GLFW_KEY_3) {
+                        tab = k - org.lwjgl.glfw.GLFW.GLFW_KEY_1;
+                        return true;
+                }
+                if (k == org.lwjgl.glfw.GLFW.GLFW_KEY_RIGHT_CONTROL) {
+                        close();
                         return true;
                 }
                 return super.keyPressed(input);
         }
 
+        private void refreshModels() {
+                List<ModelStore.ModelInfo> m = ModelStore.list();
+                models = m;
+                modelScroll = Math.max(0, Math.min(modelScroll, Math.max(0, m.size() - 4)));
+        }
+
+        private void toast(String msg) {
+                toast.clear();
+                toast.add(msg);
+                toastMs = System.currentTimeMillis();
+        }
+
         @Override
-        public boolean shouldCloseOnEsc() {
-                return true;
+        public boolean shouldPause() {
+                return false;
         }
 
         @Override

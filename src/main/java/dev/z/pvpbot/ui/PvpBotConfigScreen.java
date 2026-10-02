@@ -6,267 +6,304 @@ import dev.z.pvpbot.ml.ILStore;
 import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
-import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.text.Text;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
- * v2.2.0 — BUILT-IN ADVANCED CONFIG, REBUILT ON A CUSTOM WIDGET SYSTEM
- * (user: "make the All Configs/Settings scrollable smoothly cuz it's not
- * scrollable rn").
+ * v2.3 — PvPBot config, fully custom UI (no Minecraft buttons).
  *
- * The old screen split every setting across three FIXED pages with
- * Minecraft buttons and no scrolling at all. Everything now lives on ONE
- * smoothly scrolling page drawn with custom widgets (no Minecraft button
- * chrome):
+ * The v2.2 screen's switches and sliders were STATIC: each row captured the
+ * value it had when the screen opened and drew that forever, so a click
+ * changed the setting invisibly. Every row now reads the LIVE config value
+ * every frame (and the defaults instance for right-click reset).
  *
- *  - mouse WHEEL scrolling with eased, frame-rate independent interpolation;
- *  - left-drag anywhere on the panel (or on the scrollbar grip) with
- *    momentum on release;
- *  - a real scrollbar with a draggable grip;
- *  - custom pill toggles, custom sliders (click + drag anywhere on the
- *    track), section headers, live status rows and action buttons;
- *  - the SAME detailed hover tooltips as the Cloth Config bridge
- *    ({@link BotTooltips}).
- *
- * Every change persists to config/pvpbot/config.json immediately. Sections:
- * COMBAT / AIM & SMOOTHNESS / PURE MODE (v2) / LEARNING & IL / HUD & MISC.
+ * Layout: header + section sidebar (click = jump) + smooth-scrolling content
+ * + footer. Rows: animated switches, sliders (drag, or scroll with SHIFT for
+ * fine steps), segmented choices, action buttons, live status lines.
+ * Right-click any setting to restore its default. Hover for help.
  */
 public final class PvpBotConfigScreen extends Screen {
 
         private final Screen parent;
         private final BotConfig cfg;
-        private String status = "saved";
+        private final BotConfig defaults = new BotConfig();
+        private String status = "All changes save instantly";
+        private long statusMs = 0L;
 
-        // ---- layout ------------------------------------------------------
-        private static final int ROW_H = 22;
-        private static final int HEADER_H = 20;
-        private static final int GAP = 2;
+        private static final int ROW_H = 26;
+        private static final int SECTION_H = 24;
+        private static final int GAP = 3;
 
         private final List<Row> rows = new ArrayList<>();
+        private final List<Section> sections = new ArrayList<>();
         private int contentH = 0;
 
-        // ---- smooth scroll state ------------------------------------------
-        private float scrollCur = 0f;     // eased, what is actually drawn
-        private float scrollTarget = 0f;  // where the wheel/drag wants to be
-        private float inertia = 0f;       // drag momentum
-        private boolean panelDrag = false;
+        private float scrollCur = 0f, scrollTarget = 0f;
         private boolean gripDrag = false;
-        private double dragStartY = 0.0;
-        private float dragStartScroll = 0f;
-        private double lastDragY = 0.0;
+        private SliderRow dragging = null;
         private long lastFrameMs = 0L;
-
-        // ---- interaction ---------------------------------------------------
-        private SliderRow draggingSlider = null;
-        private final List<HoverTip> hoverTips = new ArrayList<>();
-
-        private static final class HoverTip {
-                final Row row;
-                final int index;
-                HoverTip(Row r, int i) { row = r; index = i; }
-        }
+        private float doneHover = 0f;
+        private float openAnim = 0f;
 
         public PvpBotConfigScreen(Screen parent, int page) {
-                super(Text.literal("PvPBot Advanced Config — scroll: wheel or drag"));
+                super(Text.literal("PvPBot Config"));
                 this.parent = parent;
                 this.cfg = PvpBot.get().config();
         }
 
-        // ================================================================ rows
+        // ================================================================ model
+
+        private static final class Section {
+                final String name;
+                final int color;
+                int y;      // content-space y of its header row
+                float hover;
+
+                Section(String name, int color) {
+                        this.name = name;
+                        this.color = color;
+                }
+        }
 
         private abstract class Row {
                 int h = ROW_H;
+                int y;      // content-space y
+                float hover;
+                String label = "";
+                String tip = null;
 
-                abstract void draw(DrawContext ctx, int x, int y, int w, double mx, double my, boolean hovered);
+                abstract void draw(DrawContext c, int x, int y, int w, double mx, double my, float dt);
 
-                /** @return true if the click was consumed */
                 boolean click(Click click, int x, int y, int w) {
                         return false;
                 }
 
-                boolean drag(Click click, int x, int y, int w) {
+                void drag(double mx, int x, int w) {
+                }
+
+                boolean scroll(double v, boolean fine) {
                         return false;
                 }
 
-                void release() {
+                boolean resetDefault() {
+                        return false;
                 }
 
-                Text tooltip() {
-                        return null;
+                boolean interactive() {
+                        return true;
                 }
         }
 
-        private final class HeaderRow extends Row {
-                final String label;
-                final int color;
+        private final class SectionRow extends Row {
+                final Section sec;
 
-                HeaderRow(String label, int color) {
-                        this.label = label;
-                        this.color = color;
-                        this.h = HEADER_H;
+                SectionRow(Section sec) {
+                        this.sec = sec;
+                        this.h = SECTION_H;
                 }
 
                 @Override
-                void draw(DrawContext ctx, int x, int y, int w, double mx, double my, boolean hovered) {
-                        ctx.drawText(textRenderer, Text.literal(label), x + 2, y + 6, color, true);
-                        ctx.fill(x, y + HEADER_H - 3, x + w, y + HEADER_H - 2, 0x40FFFFFF);
+                void draw(DrawContext c, int x, int y, int w, double mx, double my, float dt) {
+                        c.fill(x, y + 6, x + 3, y + 18, sec.color);
+                        Gfx.text(c, textRenderer, sec.name.toUpperCase(), x + 9, y + 8, sec.color);
+                        c.fill(x + 12 + textRenderer.getWidth(sec.name.toUpperCase()), y + 12, x + w, y + 13, Gfx.BORDER);
+                }
+
+                @Override
+                boolean interactive() {
+                        return false;
                 }
         }
 
         private final class ToggleRow extends Row {
-                final String label;
-                final Supplier<Boolean> get;
-                final java.util.function.Consumer<Boolean> set;
-                final Text tip;
+                final Function<BotConfig, Boolean> get;
+                final BiConsumer<BotConfig, Boolean> set;
+                float knob = -1f;
 
-                ToggleRow(String label, boolean initial, Text tip, java.util.function.Consumer<Boolean> set) {
+                ToggleRow(String label, String tip, Function<BotConfig, Boolean> get, BiConsumer<BotConfig, Boolean> set) {
                         this.label = label;
-                        this.get = new Supplier<>() {
-                                boolean v = initial;
-
-                                @Override
-                                public Boolean get() {
-                                        return v;
-                                }
-                        };
                         this.tip = tip;
+                        this.get = get;
                         this.set = set;
                 }
 
                 @Override
-                void draw(DrawContext ctx, int x, int y, int w, double mx, double my, boolean hovered) {
-                        boolean on = get.get();
-                        ctx.drawText(textRenderer, Text.literal(label), x + 2, y + 7, 0xFFE6EEFF, true);
-                        // pill switch (28 x 12)
-                        int px = x + w - 34, py = y + 5;
-                        ctx.fill(px, py, px + 28, py + 12, on ? 0xFF2E7D4F : 0xFF3A3F4E);
-                        ctx.fill(px + 1, py + 1, px + 27, py + 11, on ? 0xFF3FA66A : 0xFF4A5060);
-                        int knob = on ? px + 16 : px + 2;
-                        ctx.fill(knob, py + 1, knob + 10, py + 11, 0xFFF2F5FA);
-                        ctx.drawText(textRenderer, Text.literal(on ? "ON" : "OFF"), px - 26, y + 7,
-                                        on ? 0xFF7DFFA0 : 0xFF8890A0, true);
+                void draw(DrawContext c, int x, int y, int w, double mx, double my, float dt) {
+                        boolean on = get.apply(cfg);
+                        if (knob < 0f) knob = on ? 1f : 0f;
+                        knob = Gfx.approach(knob, on ? 1f : 0f, dt, 18f);
+                        Gfx.text(c, textRenderer, label, x + 10, y + 9, Gfx.TEXT);
+                        String st = on ? "ON" : "OFF";
+                        Gfx.textRight(c, textRenderer, st, x + w - 40, y + 9, on ? Gfx.GOOD : Gfx.DIM);
+                        Gfx.toggle(c, x + w - 34, y + 7, knob, hover > 0.5f);
                 }
 
                 @Override
                 boolean click(Click click, int x, int y, int w) {
-                        boolean v = !get.get();
-                        set.accept(v);
-                        save();
+                        set.accept(cfg, !get.apply(cfg));
+                        saved(label + ": " + (get.apply(cfg) ? "ON" : "OFF"));
                         return true;
                 }
 
                 @Override
-                Text tooltip() {
-                        return tip;
+                boolean resetDefault() {
+                        set.accept(cfg, get.apply(defaults));
+                        saved(label + " reset to default");
+                        return true;
                 }
         }
 
         private final class SliderRow extends Row {
-                final String label;
                 final float min, max;
                 final int digits;
-                final Supplier<Float> get;
-                final java.util.function.Consumer<Float> set;
-                final Text tip;
+                final Function<BotConfig, Float> get;
+                final BiConsumer<BotConfig, Float> set;
+                final String unit;
+                float shown = Float.NaN;
 
-                SliderRow(String label, float min, float max, float initial, int digits,
-                          Text tip, java.util.function.Consumer<Float> set) {
+                SliderRow(String label, String unit, float min, float max, int digits, String tip,
+                          Function<BotConfig, Float> get, BiConsumer<BotConfig, Float> set) {
                         this.label = label;
+                        this.unit = unit;
                         this.min = min;
                         this.max = max;
                         this.digits = digits;
-                        this.get = new Supplier<>() {
-                                float v = initial;
-
-                                @Override
-                                public Float get() {
-                                        return v;
-                                }
-                        };
                         this.tip = tip;
+                        this.get = get;
                         this.set = set;
+                        this.h = ROW_H + 4;
                 }
 
-                private float norm() {
-                        return (get.get() - min) / (max - min);
+                float norm(float v) {
+                        return (v - min) / (max - min);
                 }
 
-                private void setNorm(double n) {
-                        float v = (float) (min + Math.max(0.0, Math.min(1.0, n)) * (max - min));
+                void setValue(float v) {
+                        v = Math.max(min, Math.min(max, v));
                         float step = (float) Math.pow(10, -digits);
                         v = Math.round(v / step) * step;
-                        get2set(v);
+                        set.accept(cfg, v);
                 }
 
-                private void get2set(float v) {
-                        set.accept(v);
-                        save();
-                }
-
-                private String fmt(float v) {
-                        return digits == 0 ? String.format("%s: %.0f", label, v)
-                                        : String.format("%s: %." + digits + "f", label, v);
+                String fmt(float v) {
+                        String n = digits == 0 ? String.format("%.0f", v) : String.format("%." + digits + "f", v);
+                        return unit.isEmpty() ? n : n + " " + unit;
                 }
 
                 @Override
-                void draw(DrawContext ctx, int x, int y, int w, double mx, double my, boolean hovered) {
-                        float v = get.get();
-                        ctx.drawText(textRenderer, Text.literal(fmt(v)), x + 2, y + 2, 0xFFE6EEFF, true);
-                        // track
-                        int ty = y + 15;
-                        ctx.fill(x + 2, ty, x + w - 2, ty + 5, 0xFF232838);
-                        ctx.fill(x + 3, ty + 1, x + w - 3, ty + 4, 0xFF39415A);
-                        // filled portion
-                        float n = norm();
-                        int fillX = (int) ((w - 4) * n);
-                        ctx.fill(x + 3, ty + 1, x + 3 + fillX, ty + 4, 0xFF3D7BFF);
-                        // grip
-                        int gx = x + 2 + (int) ((w - 12) * n);
-                        ctx.fill(gx, ty - 2, gx + 8, ty + 7, draggingSlider == this ? 0xFFFFFFFF : 0xFFDCE6F5);
+                void draw(DrawContext c, int x, int y, int w, double mx, double my, float dt) {
+                        float v = get.apply(cfg);
+                        float n = norm(v);
+                        shown = Float.isNaN(shown) ? n : (dragging == this ? n : Gfx.approach(shown, n, dt, 20f));
+                        Gfx.text(c, textRenderer, label, x + 10, y + 5, Gfx.TEXT);
+                        String val = fmt(v);
+                        int vw = textRenderer.getWidth(val) + 8;
+                        Gfx.round(c, x + w - 10 - vw, y + 3, vw, 12, dragging == this ? Gfx.ACCENT_2 : Gfx.SURFACE_HI);
+                        Gfx.textRight(c, textRenderer, val, x + w - 14, y + 5, Gfx.TEXT);
+                        Gfx.slider(c, x + 10, y + 20, w - 20, shown, dragging == this, hover > 0.5f);
                 }
 
                 @Override
                 boolean click(Click click, int x, int y, int w) {
-                        double rel = (click.x() - (x + 6)) / (double) Math.max(1, w - 12);
-                        setNorm(rel);
-                        draggingSlider = this;
+                        dragging = this;
+                        drag(click.x(), x, w);
                         return true;
                 }
 
                 @Override
-                boolean drag(Click click, int x, int y, int w) {
-                        double rel = (click.x() - (x + 6)) / (double) Math.max(1, w - 12);
-                        setNorm(rel);
+                void drag(double mx, int x, int w) {
+                        double rel = (mx - (x + 14)) / Math.max(1.0, w - 28.0);
+                        setValue((float) (min + Math.max(0.0, Math.min(1.0, rel)) * (max - min)));
+                }
+
+                @Override
+                boolean scroll(double v, boolean fine) {
+                        if (!fine) return false;
+                        float step = (float) Math.pow(10, -digits);
+                        float span = (max - min) / 100f;
+                        setValue(get.apply(cfg) + (float) Math.signum(v) * Math.max(step, span));
+                        saved(label + " = " + fmt(get.apply(cfg)));
                         return true;
                 }
 
                 @Override
-                Text tooltip() {
-                        return tip;
+                boolean resetDefault() {
+                        set.accept(cfg, get.apply(defaults));
+                        saved(label + " reset to " + fmt(get.apply(cfg)));
+                        return true;
+                }
+        }
+
+        private final class ChoiceRow extends Row {
+                final String[] options;
+                final Function<BotConfig, Integer> get;
+                final BiConsumer<BotConfig, Integer> set;
+                float sel = -1f;
+
+                ChoiceRow(String label, String tip, String[] options, Function<BotConfig, Integer> get,
+                          BiConsumer<BotConfig, Integer> set) {
+                        this.label = label;
+                        this.tip = tip;
+                        this.options = options;
+                        this.get = get;
+                        this.set = set;
+                        this.h = ROW_H + 8;
+                }
+
+                @Override
+                void draw(DrawContext c, int x, int y, int w, double mx, double my, float dt) {
+                        int cur = Math.max(0, Math.min(options.length - 1, get.apply(cfg)));
+                        if (sel < 0f) sel = cur;
+                        sel = Gfx.approach(sel, cur, dt, 16f);
+                        Gfx.text(c, textRenderer, label, x + 10, y + 4, Gfx.TEXT);
+                        int bx = x + 10, bw = w - 20, by = y + 15, bh = 14;
+                        Gfx.round(c, bx, by, bw, bh, Gfx.TRACK);
+                        int segW = bw / options.length;
+                        Gfx.round(c, bx + (int) (sel * segW) + 1, by + 1, segW - 2, bh - 2, Gfx.ACCENT);
+                        for (int i = 0; i < options.length; i++) {
+                                Gfx.textCentered(c, textRenderer, options[i], bx + i * segW + segW / 2, by + 3,
+                                                i == cur ? 0xFFFFFFFF : Gfx.MUTED);
+                        }
+                }
+
+                @Override
+                boolean click(Click click, int x, int y, int w) {
+                        int bx = x + 10, bw = w - 20;
+                        int segW = bw / options.length;
+                        int i = (int) ((click.x() - bx) / Math.max(1, segW));
+                        if (i < 0 || i >= options.length || click.y() < y + 13) return true;
+                        set.accept(cfg, i);
+                        saved(label + ": " + options[i]);
+                        return true;
+                }
+
+                @Override
+                boolean resetDefault() {
+                        set.accept(cfg, get.apply(defaults));
+                        saved(label + " reset");
+                        return true;
                 }
         }
 
         private final class ButtonRow extends Row {
-                final String label;
                 final int color;
                 final Runnable action;
 
-                ButtonRow(String label, int color, Runnable action) {
+                ButtonRow(String label, int color, String tip, Runnable action) {
                         this.label = label;
                         this.color = color;
+                        this.tip = tip;
                         this.action = action;
                 }
 
                 @Override
-                void draw(DrawContext ctx, int x, int y, int w, double mx, double my, boolean hovered) {
-                        ctx.fill(x, y, x + w, y + h - 1, hovered ? 0xFF22335C : 0xFF182238);
-                        ctx.fill(x, y, x + w, y + 1, 0xFF3D7BFF);
-                        ctx.drawCenteredTextWithShadow(textRenderer, Text.literal(label),
-                                        x + w / 2, y + 6, color);
+                void draw(DrawContext c, int x, int y, int w, double mx, double my, float dt) {
+                        Gfx.button(c, textRenderer, x + 6, y + 3, w - 12, h - 6, label, color, hover, true);
                 }
 
                 @Override
@@ -278,361 +315,357 @@ public final class PvpBotConfigScreen extends Screen {
 
         private final class StatusRow extends Row {
                 final Supplier<String> text;
-                final int color;
 
-                StatusRow(Supplier<String> text, int color) {
+                StatusRow(Supplier<String> text) {
                         this.text = text;
-                        this.color = color;
+                        this.h = 18;
                 }
 
                 @Override
-                void draw(DrawContext ctx, int x, int y, int w, double mx, double my, boolean hovered) {
-                        String s = text.get();
-                        if (s.length() > 58) s = s.substring(0, 57) + "…";
-                        ctx.fill(x, y, x + w, y + h - 1, 0xFF10151F);
-                        ctx.drawText(textRenderer, Text.literal(s), x + 4, y + 7, color, true);
+                void draw(DrawContext c, int x, int y, int w, double mx, double my, float dt) {
+                        String s = textRenderer.trimToWidth(text.get(), w - 24);
+                        Gfx.round(c, x + 6, y + 1, w - 12, 16, 0xFF0F1422);
+                        Gfx.text(c, textRenderer, s, x + 12, y + 5, 0xFFB7C6EA);
+                }
+
+                @Override
+                boolean interactive() {
+                        return false;
                 }
         }
 
         // ================================================================ build
 
-        @Override
-        protected void init() {
-                hoverTips.clear();
-                rows.clear();
-                scrollTarget = 0f;
-                scrollCur = 0f;
-
-                // ---- COMBAT ----
-                rows.add(new HeaderRow("COMBAT", 0xFFFF9A66));
-                rows.add(new ToggleRow("TriggerBot (click on crosshair)", cfg.triggerBot,
-                                BotTooltips.TRIGGERBOT, v -> cfg.triggerBot = v));
-                rows.add(new SliderRow("Band min", 0.5f, 1.0f, cfg.attackCooldownMin, 2,
-                                BotTooltips.BAND_MIN, v -> cfg.attackCooldownMin = v));
-                rows.add(new SliderRow("Band max", 0.5f, 1.0f, cfg.attackCooldownMax, 2,
-                                BotTooltips.BAND_MAX, v -> cfg.attackCooldownMax = v));
-                rows.add(new ToggleRow("WTap (S-tap) enabled", cfg.wtapEnabled,
-                                BotTooltips.WTAP_ENABLED, v -> cfg.wtapEnabled = v));
-                rows.add(new SliderRow("WTap %", 0f, 1f, cfg.wtapChance, 2,
-                                BotTooltips.WTAP_CHANCE, v -> cfg.wtapChance = v));
-                rows.add(new SliderRow("WTap S min ms", 100, 1000, cfg.wtapMinMs, 0,
-                                BotTooltips.WTAP_MIN_MS, v -> cfg.wtapMinMs = Math.round(v)));
-                rows.add(new SliderRow("WTap S max ms", 100, 1200, cfg.wtapMaxMs, 0,
-                                BotTooltips.WTAP_MAX_MS, v -> cfg.wtapMaxMs = Math.round(v)));
-                rows.add(new ToggleRow("Sprint hits only", cfg.sprintHitOnly,
-                                BotTooltips.SPRINT_HIT_ONLY, v -> cfg.sprintHitOnly = v));
-                rows.add(new ToggleRow("Jump reset", cfg.jumpResetEnabled,
-                                BotTooltips.JUMP_RESET, v -> cfg.jumpResetEnabled = v));
-                rows.add(new SliderRow("JumpReset min ms", 60, 300, cfg.jumpResetMinMs, 0,
-                                BotTooltips.JUMP_RESET_MIN_MS, v -> cfg.jumpResetMinMs = Math.round(v)));
-                rows.add(new SliderRow("JumpReset max ms", 60, 400, cfg.jumpResetMaxMs, 0,
-                                BotTooltips.JUMP_RESET_MAX_MS, v -> cfg.jumpResetMaxMs = Math.round(v)));
-                rows.add(new SliderRow("Sneak hit %", 0f, 3f, cfg.sneakHitChance, 2,
-                                BotTooltips.SNEAK_HIT, v -> cfg.sneakHitChance = v));
-                rows.add(new SliderRow("Sneak+jump %", 0f, 3f, cfg.sneakJumpHitChance, 2,
-                                BotTooltips.SNEAK_JUMP_HIT, v -> cfg.sneakJumpHitChance = v));
-                rows.add(new SliderRow("Crit %", 0f, 3f, cfg.critAttemptChance, 2,
-                                BotTooltips.CRIT_CHANCE, v -> cfg.critAttemptChance = v));
-                rows.add(new SliderRow("MidAir %", 0f, 3f, cfg.midAirChance, 2,
-                                BotTooltips.MIDAIR_CHANCE, v -> cfg.midAirChance = v));
-                rows.add(new SliderRow("Backoff < blocks", 0f, 3f, cfg.tooCloseDist, 2,
-                                BotTooltips.BACKOFF_BELOW, v -> cfg.tooCloseDist = v));
-                rows.add(new SliderRow("Backoff release", 0f, 3f, cfg.backoffReleaseDist, 2,
-                                BotTooltips.BACKOFF_RELEASE, v -> cfg.backoffReleaseDist = v));
-                rows.add(new SliderRow("Backoff max ticks", 6, 100, cfg.maxBackoffTicks, 0,
-                                BotTooltips.BACKOFF_MAX, v -> cfg.maxBackoffTicks = Math.round(v)));
-                rows.add(new ToggleRow("Backoff spacing", cfg.backoffEnabled,
-                                BotTooltips.BACKOFF_ENABLED, v -> cfg.backoffEnabled = v));
-
-                // ---- AIM & SMOOTHNESS ----
-                rows.add(new HeaderRow("AIM & SMOOTHNESS", 0xFF55AAFF));
-                rows.add(new SliderRow("Anti-Wobble (0 raw … 1 max calm)", 0f, 1f, cfg.antiWobble, 2,
-                                BotTooltips.ANTI_WOBBLE, v -> cfg.antiWobble = v));
-                rows.add(new ToggleRow("Aim assist", cfg.aimAssistEnabled,
-                                BotTooltips.AIM_ASSIST, v -> cfg.aimAssistEnabled = v));
-                rows.add(new SliderRow("Assist str", 0f, 3f, cfg.aimAssistStrength, 2,
-                                BotTooltips.AIM_ASSIST_STRENGTH, v -> cfg.aimAssistStrength = v));
-                rows.add(new SliderRow("Aim smooth min", 0f, 1f, cfg.aimSmoothMin, 2,
-                                BotTooltips.SMOOTH_MIN, v -> cfg.aimSmoothMin = v));
-                rows.add(new SliderRow("Aim smooth max", 0f, 1f, cfg.aimSmoothMax, 2,
-                                BotTooltips.SMOOTH_MAX, v -> cfg.aimSmoothMax = v));
-                rows.add(new SliderRow("Turn cap deg", 5f, 180f, cfg.aimMaxTurnDeg, 0,
-                                BotTooltips.TURN_CAP, v -> cfg.aimMaxTurnDeg = v));
-                rows.add(new SliderRow("Aim noise deg", 0f, 3f, cfg.aimNoiseDeg, 2,
-                                BotTooltips.AIM_NOISE, v -> cfg.aimNoiseDeg = v));
-                rows.add(new SliderRow("Aim zone (0 Head … 3 Chest)", 0f, 3f, cfg.aimZone, 0,
-                                BotTooltips.AIM_ZONE, v -> cfg.aimZone = Math.round(v)));
-                rows.add(new SliderRow("Aim lead ticks", 0, 10, cfg.aimLeadTicks, 0,
-                                BotTooltips.AIM_LEAD, v -> cfg.aimLeadTicks = Math.round(v)));
-                rows.add(new ToggleRow("Aim prediction (accel)", cfg.aimPredict,
-                                BotTooltips.AIM_PREDICT, v -> cfg.aimPredict = v));
-                rows.add(new ToggleRow("Frame aim (60Hz+)", cfg.frameAim,
-                                BotTooltips.FRAME_AIM, v -> cfg.frameAim = v));
-
-                // ---- PURE MODE (v2) ----
-                rows.add(new HeaderRow("PURE MODE (v2 four-head brain)", 0xFFB07DFF));
-                rows.add(new ToggleRow("Pure mode", cfg.pureMode,
-                                BotTooltips.PURE_MODE, v -> PvpBot.get().controller().setPureMode(v)));
-                rows.add(new ToggleRow("Pure immediate attack (no TriggerBot)", cfg.pureImmediateAttack,
-                                BotTooltips.PURE_IMMEDIATE, v -> cfg.pureImmediateAttack = v));
-                rows.add(new SliderRow("Retreat limit (ticks)", 0, 30, cfg.pureRetreatLimit, 0,
-                                BotTooltips.PURE_RETREAT, v -> cfg.pureRetreatLimit = Math.round(v)));
-                // v2.2.1: the aggression floor — the other half of "backing off
-                // tooooo much" (hovering just outside reach never gets punished
-                // by the back-move governor because it is not a back-move)
-                rows.add(new SliderRow("Aggression floor (ticks beyond 3.0m)", 0, 100, cfg.pureCloseLimit, 0,
-                                BotTooltips.PURE_CLOSE, v -> cfg.pureCloseLimit = Math.round(v)));
-                rows.add(new SliderRow("Sprint-gate patience (pure, ticks)", 2, 60, cfg.sprintGatePatiencePure, 0,
-                                BotTooltips.SPRINT_PATIENCE, v -> cfg.sprintGatePatiencePure = Math.round(v)));
-                rows.add(new SliderRow("Click range (blocks, v2.3)", 2.5f, 3.4f, cfg.clickMaxDist, 2,
-                                BotTooltips.CLICK_MAX_DIST, v -> cfg.clickMaxDist = v));
-                rows.add(new SliderRow("v2 learn rate (rapid)", 0f, 0.001f, cfg.v2LrRapid, 5,
-                                BotTooltips.V2_LR, v -> cfg.v2LrRapid = v));
-                rows.add(new SliderRow("v2 learn rate (stable)", 0f, 0.001f, cfg.v2LrStable, 5,
-                                BotTooltips.V2_LR, v -> cfg.v2LrStable = v));
-                rows.add(new ToggleRow("Aim head opt-in (bench until earned)", cfg.pureAimHead,
-                                BotTooltips.PURE_AIM_HEAD, v -> cfg.pureAimHead = v));
-                rows.add(new ToggleRow("Sneak opt-in (bench until earned)", cfg.pureSneak,
-                                BotTooltips.PURE_SNEAK, v -> cfg.pureSneak = v));
-                rows.add(new SliderRow("Pure aim blend (legacy)", 0f, 1f, cfg.pureAimAssist, 2,
-                                BotTooltips.PURE_AIM_BLEND, v -> cfg.pureAimAssist = v));
-                rows.add(new SliderRow("Pure aim max deg", 5f, 90f, cfg.pureAimMaxDeg, 0,
-                                BotTooltips.PURE_AIM_MAX, v -> cfg.pureAimMaxDeg = v));
-                rows.add(new ToggleRow("Face-target reward shaping", cfg.pureShaping,
-                                BotTooltips.PURE_SHAPING, v -> cfg.pureShaping = v));
-
-                // ---- LEARNING & IL ----
-                rows.add(new HeaderRow("LEARNING & IMITATION (IL)", 0xFF7DFFA0));
-                rows.add(new ToggleRow("Imitation learning (DQfD)", cfg.imitationEnabled,
-                                BotTooltips.IMITATION, v -> cfg.imitationEnabled = v));
-                rows.add(new SliderRow("Imit. ratio", 0f, 0.6f, cfg.imitationRatio, 2,
-                                BotTooltips.IMITATION_RATIO, v -> cfg.imitationRatio = v));
-                rows.add(new SliderRow("Kill reward", 6, 120, cfg.winReward, 0,
-                                BotTooltips.KILL_REWARD, v -> cfg.winReward = v));
-                rows.add(new SliderRow("Loss penalty", -40, 0, cfg.lossReward, 0,
-                                BotTooltips.LOSS_REWARD, v -> cfg.lossReward = v));
-                rows.add(new SliderRow("Eps cap (exploit floor)", 0f, 0.3f, cfg.epsilonStable, 2,
-                                BotTooltips.INNOVATION, v -> cfg.epsilonStable = v));
-                rows.add(new ToggleRow("Round text detect", cfg.roundTextDetection,
-                                BotTooltips.ROUND_TEXT, v -> cfg.roundTextDetection = v));
-                rows.add(new SliderRow("Round debounce ms", 1000, 10000, cfg.roundDebounceMs, 0,
-                                BotTooltips.ROUND_DEBOUNCE, v -> cfg.roundDebounceMs = Math.round(v)));
-                rows.add(new ToggleRow("IL autoload at launch", cfg.ilAutoLoad,
-                                BotTooltips.IL_AUTOLOAD, v -> cfg.ilAutoLoad = v));
-                rows.add(new StatusRow(() -> ILStore.get().statusLine(), 0xFFBBD4FF));
-                rows.add(new ButtonRow("IL: (RE)LOAD video sessions now", 0xFF9FE870, () -> {
-                        status = "loading IL sessions…";
-                        final PvpBot bot = PvpBot.get();
-                        PvpBot.worker().execute(() -> status = ILStore.get().loadAll(bot));
-                }));
-                rows.add(new ButtonRow("IL: train 60 bursts on loaded demos", 0xFF9FE870, () -> {
-                        ILStore il = ILStore.get();
-                        if (!il.isLoaded()) {
-                                status = "IL not loaded — load sessions first";
-                        } else {
-                                il.train(PvpBot.get(), 60);
-                                status = "IL training queued (60 bursts)";
-                        }
-                }));
-                rows.add(new ButtonRow("IL: open the il/ folder (drop sessions here)", 0xFFBBD4FF, () -> {
-                        java.nio.file.Path d = ILStore.dir();
-                        try {
-                                java.nio.file.Files.createDirectories(d);
-                                java.awt.Desktop.getDesktop().open(d.toFile());
-                                status = "opened " + d;
-                        } catch (Throwable ex) {
-                                status = "il/ folder: " + d;
-                        }
-                }));
-
-                // ---- HUD & MISC ----
-                rows.add(new HeaderRow("HUD & MISC", 0xFFFFDD77));
-                rows.add(new ToggleRow("HUD", cfg.hudEnabled, BotTooltips.HUD, v -> cfg.hudEnabled = v));
-                rows.add(new ToggleRow("Keystrokes HUD", cfg.keystrokesEnabled,
-                                BotTooltips.KEYSTROKES, v -> cfg.keystrokesEnabled = v));
-                rows.add(new ToggleRow("Thought HUD", cfg.thoughtHudEnabled,
-                                BotTooltips.THOUGHT_HUD, v -> cfg.thoughtHudEnabled = v));
-                rows.add(new ToggleRow("Grid snap", cfg.sensitivityGridSnap,
-                                BotTooltips.GRID_SNAP, v -> cfg.sensitivityGridSnap = v));
-                rows.add(new ButtonRow("Open HUD Layout Editor (move / resize)", 0xFFFFDD77, () -> {
-                        save();
-                        if (this.client != null) {
-                                this.client.setScreen(new PvpBotHudEditScreen(this));
-                        }
-                }));
-
-                int y = 0;
-                for (Row r : rows) {
-                        y += r.h + GAP;
-                }
-                contentH = y;
-
-                addDrawableChild(ButtonWidget.builder(Text.literal("Done"), b -> close())
-                                .dimensions(this.width / 2 - 50, this.height - 26, 100, 20).build());
+        private void section(String name, int color) {
+                Section s = new Section(name, color);
+                sections.add(s);
+                rows.add(new SectionRow(s));
         }
 
-        private void save() {
+        private void toggle(String label, String tip, Function<BotConfig, Boolean> g, BiConsumer<BotConfig, Boolean> s) {
+                rows.add(new ToggleRow(label, tip, g, s));
+        }
+
+        private void slider(String label, String unit, float min, float max, int digits, String tip,
+                            Function<BotConfig, Float> g, BiConsumer<BotConfig, Float> s) {
+                rows.add(new SliderRow(label, unit, min, max, digits, tip, g, s));
+        }
+
+        private void islider(String label, String unit, int min, int max, String tip,
+                             Function<BotConfig, Integer> g, BiConsumer<BotConfig, Integer> s) {
+                rows.add(new SliderRow(label, unit, min, max, 0, tip, c -> (float) g.apply(c), (c, v) -> s.accept(c, Math.round(v))));
+        }
+
+        private static String tipOf(Text t) {
+                return t == null ? null : t.getString();
+        }
+
+        @Override
+        protected void init() {
+                rows.clear();
+                sections.clear();
+
+                section("Combat", 0xFFFF9A6B);
+                toggle("TriggerBot", tipOf(BotTooltips.TRIGGERBOT), c -> c.triggerBot, (c, v) -> c.triggerBot = v);
+                slider("Attack band min", "", 0.5f, 1.0f, 2, tipOf(BotTooltips.BAND_MIN), c -> c.attackCooldownMin, (c, v) -> c.attackCooldownMin = v);
+                slider("Attack band max", "", 0.5f, 1.0f, 2, tipOf(BotTooltips.BAND_MAX), c -> c.attackCooldownMax, (c, v) -> c.attackCooldownMax = v);
+                slider("Click range", "blocks", 2.5f, 3.4f, 2, tipOf(BotTooltips.CLICK_MAX_DIST), c -> c.clickMaxDist, (c, v) -> c.clickMaxDist = v);
+                toggle("Sprint hits only", tipOf(BotTooltips.SPRINT_HIT_ONLY), c -> c.sprintHitOnly, (c, v) -> c.sprintHitOnly = v);
+                toggle("W-Tap (S-tap)", tipOf(BotTooltips.WTAP_ENABLED), c -> c.wtapEnabled, (c, v) -> c.wtapEnabled = v);
+                slider("W-Tap chance", "", 0f, 1f, 2, tipOf(BotTooltips.WTAP_CHANCE), c -> c.wtapChance, (c, v) -> c.wtapChance = v);
+                islider("W-Tap S hold min", "ms", 100, 1000, tipOf(BotTooltips.WTAP_MIN_MS), c -> c.wtapMinMs, (c, v) -> c.wtapMinMs = v);
+                islider("W-Tap S hold max", "ms", 100, 1200, tipOf(BotTooltips.WTAP_MAX_MS), c -> c.wtapMaxMs, (c, v) -> c.wtapMaxMs = v);
+                toggle("Jump reset", tipOf(BotTooltips.JUMP_RESET), c -> c.jumpResetEnabled, (c, v) -> c.jumpResetEnabled = v);
+                islider("Jump reset min", "ms", 0, 300, tipOf(BotTooltips.JUMP_RESET_MIN_MS), c -> c.jumpResetMinMs, (c, v) -> c.jumpResetMinMs = v);
+                islider("Jump reset max", "ms", 0, 400, tipOf(BotTooltips.JUMP_RESET_MAX_MS), c -> c.jumpResetMaxMs, (c, v) -> c.jumpResetMaxMs = v);
+                slider("Sneak hit chance", "", 0f, 1f, 2, tipOf(BotTooltips.SNEAK_HIT), c -> c.sneakHitChance, (c, v) -> c.sneakHitChance = v);
+                slider("Sneak + jump chance", "", 0f, 1f, 2, tipOf(BotTooltips.SNEAK_JUMP_HIT), c -> c.sneakJumpHitChance, (c, v) -> c.sneakJumpHitChance = v);
+                slider("Crit chance", "", 0f, 1f, 2, tipOf(BotTooltips.CRIT_CHANCE), c -> c.critAttemptChance, (c, v) -> c.critAttemptChance = v);
+                slider("Mid-air hit chance", "", 0f, 1f, 2, tipOf(BotTooltips.MIDAIR_CHANCE), c -> c.midAirChance, (c, v) -> c.midAirChance = v);
+                toggle("Backoff spacing", tipOf(BotTooltips.BACKOFF_ENABLED), c -> c.backoffEnabled, (c, v) -> c.backoffEnabled = v);
+                slider("Backoff below", "blocks", 0f, 3f, 2, tipOf(BotTooltips.BACKOFF_BELOW), c -> c.tooCloseDist, (c, v) -> c.tooCloseDist = v);
+                slider("Backoff release", "blocks", 0f, 3f, 2, tipOf(BotTooltips.BACKOFF_RELEASE), c -> c.backoffReleaseDist, (c, v) -> c.backoffReleaseDist = v);
+                islider("Backoff max", "ticks", 6, 100, tipOf(BotTooltips.BACKOFF_MAX), c -> c.maxBackoffTicks, (c, v) -> c.maxBackoffTicks = v);
+
+                section("Aim", 0xFF5BA8FF);
+                slider("Anti-wobble", "", 0f, 1f, 2, tipOf(BotTooltips.ANTI_WOBBLE), c -> c.antiWobble, (c, v) -> c.antiWobble = v);
+                rows.add(new ChoiceRow("Aim zone", tipOf(BotTooltips.AIM_ZONE), new String[]{"Head", "Eyes", "Neck", "Chest"},
+                                c -> c.aimZone, (c, v) -> c.aimZone = v));
+                toggle("Aim assist", tipOf(BotTooltips.AIM_ASSIST), c -> c.aimAssistEnabled, (c, v) -> c.aimAssistEnabled = v);
+                slider("Assist strength", "", 0f, 1f, 2, tipOf(BotTooltips.AIM_ASSIST_STRENGTH), c -> c.aimAssistStrength, (c, v) -> c.aimAssistStrength = v);
+                slider("Smoothing min", "", 0f, 1f, 2, tipOf(BotTooltips.SMOOTH_MIN), c -> c.aimSmoothMin, (c, v) -> c.aimSmoothMin = v);
+                slider("Smoothing max", "", 0f, 1f, 2, tipOf(BotTooltips.SMOOTH_MAX), c -> c.aimSmoothMax, (c, v) -> c.aimSmoothMax = v);
+                slider("Turn cap", "°/tick", 5f, 180f, 0, tipOf(BotTooltips.TURN_CAP), c -> c.aimMaxTurnDeg, (c, v) -> c.aimMaxTurnDeg = v);
+                slider("Micro noise", "°", 0f, 1f, 2, tipOf(BotTooltips.AIM_NOISE), c -> c.aimNoiseDeg, (c, v) -> c.aimNoiseDeg = v);
+                islider("Lead", "ticks", 0, 6, tipOf(BotTooltips.AIM_LEAD), c -> c.aimLeadTicks, (c, v) -> c.aimLeadTicks = v);
+                toggle("Head priority", "Wander inside the head zone (chin to crown) instead of the whole body.",
+                                c -> c.aimHeadPriority, (c, v) -> c.aimHeadPriority = v);
+                toggle("Threaded 120 Hz aim", "Aim is computed on its own 120 Hz thread and injected every frame (smoothest). Off = per-frame aim.",
+                                c -> c.threadedAim, (c, v) -> {
+                                        c.threadedAim = v;
+                                        if (v) PvpBot.get().controller().aimThread.ensureStarted();
+                                });
+                toggle("Frame aim (60 Hz+)", tipOf(BotTooltips.FRAME_AIM), c -> c.frameAim, (c, v) -> c.frameAim = v);
+
+                section("Pure mode (v2 brain)", 0xFFB48CFF);
+                toggle("Pure mode", tipOf(BotTooltips.PURE_MODE), c -> c.pureMode, (c, v) -> PvpBot.get().controller().setPureMode(v));
+                toggle("Immediate attack", tipOf(BotTooltips.PURE_IMMEDIATE), c -> c.pureImmediateAttack, (c, v) -> c.pureImmediateAttack = v);
+                islider("Retreat limit", "ticks", 0, 30, tipOf(BotTooltips.PURE_RETREAT), c -> c.pureRetreatLimit, (c, v) -> c.pureRetreatLimit = v);
+                islider("Aggression floor", "ticks", 0, 100, tipOf(BotTooltips.PURE_CLOSE), c -> c.pureCloseLimit, (c, v) -> c.pureCloseLimit = v);
+                islider("Sprint-gate patience", "ticks", 2, 60, tipOf(BotTooltips.SPRINT_PATIENCE), c -> c.sprintGatePatiencePure, (c, v) -> c.sprintGatePatiencePure = v);
+                slider("Learn rate (rapid)", "", 0f, 0.0005f, 5, tipOf(BotTooltips.V2_LR), c -> c.v2LrRapid, (c, v) -> c.v2LrRapid = v);
+                slider("Learn rate (stable)", "", 0f, 0.0005f, 5, tipOf(BotTooltips.V2_LR), c -> c.v2LrStable, (c, v) -> c.v2LrStable = v);
+                toggle("Aim head (opt-in)", tipOf(BotTooltips.PURE_AIM_HEAD), c -> c.pureAimHead, (c, v) -> c.pureAimHead = v);
+                toggle("Sneak muscle (opt-in)", tipOf(BotTooltips.PURE_SNEAK), c -> c.pureSneak, (c, v) -> c.pureSneak = v);
+                slider("Aim max per tick", "°", 5f, 90f, 0, tipOf(BotTooltips.PURE_AIM_MAX), c -> c.pureAimMaxDeg, (c, v) -> c.pureAimMaxDeg = v);
+                toggle("Face-target shaping", tipOf(BotTooltips.PURE_SHAPING), c -> c.pureShaping, (c, v) -> c.pureShaping = v);
+                rows.add(new StatusRow(() -> PvpBot.get().controller().v2StatusLine()));
+
+                section("Learning", 0xFF6BE3A0);
+                toggle("Imitation (DQfD)", tipOf(BotTooltips.IMITATION), c -> c.imitationEnabled, (c, v) -> c.imitationEnabled = v);
+                slider("Imitation share", "", 0f, 0.6f, 2, tipOf(BotTooltips.IMITATION_RATIO), c -> c.imitationRatio, (c, v) -> c.imitationRatio = v);
+                slider("Kill reward", "", 6f, 120f, 0, tipOf(BotTooltips.KILL_REWARD), c -> c.winReward, (c, v) -> c.winReward = v);
+                slider("Loss penalty", "", -40f, 0f, 0, tipOf(BotTooltips.LOSS_REWARD), c -> c.lossReward, (c, v) -> c.lossReward = v);
+                slider("Exploration floor", "", 0f, 0.3f, 2, tipOf(BotTooltips.INNOVATION), c -> c.epsilonStable, (c, v) -> c.epsilonStable = v);
+                toggle("Round text detection", tipOf(BotTooltips.ROUND_TEXT), c -> c.roundTextDetection, (c, v) -> c.roundTextDetection = v);
+                islider("Round debounce", "ms", 1000, 10000, tipOf(BotTooltips.ROUND_DEBOUNCE), c -> c.roundDebounceMs, (c, v) -> c.roundDebounceMs = v);
+                toggle("IL autoload", tipOf(BotTooltips.IL_AUTOLOAD), c -> c.ilAutoLoad, (c, v) -> c.ilAutoLoad = v);
+                rows.add(new StatusRow(() -> ILStore.get().statusLine()));
+                rows.add(new ButtonRow("Load IL video sessions", 0xFF2B5E46, "Scan config/pvpbot/il/ and load every session into both brains.", () -> {
+                        saved("Loading IL sessions…");
+                        final PvpBot bot = PvpBot.get();
+                        PvpBot.worker().execute(() -> saved(ILStore.get().loadAll(bot)));
+                }));
+                rows.add(new ButtonRow("Train 60 bursts on IL demos", 0xFF2B5E46, "Queue 60 imitation training bursts on the loaded demos.", () -> {
+                        ILStore il = ILStore.get();
+                        if (!il.isLoaded()) {
+                                saved("IL not loaded — load sessions first");
+                        } else {
+                                il.train(PvpBot.get(), 60);
+                                saved("IL training queued (60 bursts)");
+                        }
+                }));
+
+                section("HUD & misc", 0xFFFFD36B);
+                toggle("HUD", tipOf(BotTooltips.HUD), c -> c.hudEnabled, (c, v) -> c.hudEnabled = v);
+                toggle("Keystrokes", tipOf(BotTooltips.KEYSTROKES), c -> c.keystrokesEnabled, (c, v) -> c.keystrokesEnabled = v);
+                toggle("Thought line", tipOf(BotTooltips.THOUGHT_HUD), c -> c.thoughtHudEnabled, (c, v) -> c.thoughtHudEnabled = v);
+                toggle("Trade log", "Show the last hits / crits / misses / hits taken.", c -> c.tradeLogEnabled, (c, v) -> c.tradeLogEnabled = v);
+                toggle("Training stats", "Show the learning panel (epsilon, loss, reward, buffer).", c -> c.trainingStatsEnabled, (c, v) -> c.trainingStatsEnabled = v);
+                toggle("Combo meter", "Show the combo counter.", c -> c.comboMeterEnabled, (c, v) -> c.comboMeterEnabled = v);
+                rows.add(new ButtonRow("Open HUD layout editor", 0xFF5E4A1F, "Drag HUD elements to move them, scroll on one to resize it.", () -> {
+                        cfg.save();
+                        if (client != null) client.setScreen(new PvpBotHudEditScreen(this));
+                }));
+
+                layoutRows();
+        }
+
+        private void layoutRows() {
+                int y = 0;
+                for (Row r : rows) {
+                        r.y = y;
+                        if (r instanceof SectionRow sr) sr.sec.y = y;
+                        y += r.h + GAP;
+                }
+                contentH = y + 6;
+        }
+
+        private void saved(String msg) {
                 cfg.save();
-                status = "saved";
+                status = msg;
+                statusMs = System.currentTimeMillis();
         }
 
         // ================================================================ layout
 
-        private int panelX() {
-                return (this.width - panelW()) / 2;
+        private int pw() {
+                return Math.min(this.width - 16, 560);
         }
 
-        private int panelW() {
-                return Math.min(380, this.width - 40);
+        private int ph() {
+                return Math.min(this.height - 16, 420);
+        }
+
+        private int px() {
+                return (this.width - pw()) / 2;
+        }
+
+        private int py() {
+                return (this.height - ph()) / 2;
+        }
+
+        private int sideW() {
+                return pw() >= 380 ? 112 : 0;
+        }
+
+        private int contentX() {
+                return px() + sideW() + 8;
+        }
+
+        private int contentW() {
+                return pw() - sideW() - 22;
         }
 
         private int viewTop() {
-                return 28;
+                return py() + 38;
         }
 
         private int viewBottom() {
-                return this.height - 34;
+                return py() + ph() - 34;
         }
 
         private float maxScroll() {
                 return Math.max(0, contentH - (viewBottom() - viewTop()));
         }
 
-        private int gripY() {
-                float span = viewBottom() - viewTop();
-                float m = maxScroll();
-                float n = m <= 0 ? 0 : scrollCur / m;
-                float gh = Math.max(24, span * (span / Math.max(span, contentH)));
-                return (int) (viewTop() + n * (span - gh));
-        }
-
-        private int gripH() {
-                float span = viewBottom() - viewTop();
-                return (int) Math.max(24, span * (span / Math.max(span, contentH)));
-        }
-
         // ================================================================ render
 
         @Override
-        public void render(DrawContext context, int mouseX, int mouseY, float delta) {
-                super.render(context, mouseX, mouseY, delta);
+        public void renderBackground(DrawContext c, int mouseX, int mouseY, float delta) {
+                c.fillGradient(0, 0, this.width, this.height, 0xB0060810, 0xD0080B14);
+        }
+
+        @Override
+        public void render(DrawContext c, int mouseX, int mouseY, float delta) {
                 long now = System.currentTimeMillis();
                 if (lastFrameMs == 0L) lastFrameMs = now;
-                float dtSec = Math.min(0.1f, (now - lastFrameMs) / 1000f);
+                float dt = Math.min(0.1f, (now - lastFrameMs) / 1000f);
                 lastFrameMs = now;
+                openAnim = Gfx.approach(openAnim, 1f, dt, 10f);
 
-                // eased scrolling (inertia decays, target approaches)
-                if (inertia != 0f) {
-                        scrollTarget += inertia * dtSec;
-                        if (Math.abs(inertia) < 24f) inertia = 0f;
-                        else inertia *= (float) Math.exp(-dtSec * 6.0);
-                }
                 scrollTarget = Math.max(0f, Math.min(maxScroll(), scrollTarget));
-                float ease = 1f - (float) Math.exp(-dtSec * 14.0);
-                scrollCur += (scrollTarget - scrollCur) * ease;
-                if (Math.abs(scrollTarget - scrollCur) < 0.15f) scrollCur = scrollTarget;
+                scrollCur = Gfx.approach(scrollCur, scrollTarget, dt, 16f);
 
-                int px = panelX(), pw = panelW();
-                int top = viewTop(), bottom = viewBottom();
+                int px = px(), py = py() + (int) ((1f - openAnim) * 12), pw = pw(), ph = ph();
+                Gfx.shadow(c, px, py, pw, ph);
+                Gfx.card(c, px, py, pw, ph, Gfx.BG, Gfx.BORDER);
+                // header
+                c.fillGradient(px + 1, py + 1, px + pw - 1, py + 3, Gfx.ACCENT, Gfx.ACCENT_2);
+                Gfx.text(c, textRenderer, "PvPBot", px + 12, py + 12, 0xFFFFFFFF);
+                Gfx.text(c, textRenderer, "settings", px + 14 + textRenderer.getWidth("PvPBot"), py + 12, Gfx.MUTED);
+                String mode = cfg.pureMode ? "PURE v2" : "CLASSIC v1";
+                int mw = textRenderer.getWidth(mode) + 12;
+                Gfx.round(c, px + pw - 12 - mw, py + 9, mw, 14, cfg.pureMode ? 0xFF4B2F86 : 0xFF23406E);
+                Gfx.textCentered(c, textRenderer, mode, px + pw - 12 - mw / 2, py + 12, 0xFFFFFFFF);
+                c.fill(px + 8, py + 31, px + pw - 8, py + 32, Gfx.BORDER);
 
-                context.fill(px - 6, top - 6, px + pw + 6, bottom + 6, 0xB0080B12);
-                context.fill(px - 6, top - 6, px + pw + 6, top - 5, 0xFF3D7BFF);
-                context.drawCenteredTextWithShadow(textRenderer,
-                                Text.literal("PvPBot Advanced Config"), this.width / 2, top - 20, 0xFFFFFF55);
-
-                context.enableScissor(px, top, px + pw, bottom);
-                context.fill(px, top, px + pw, bottom, 0xF40B0E16);
-
-                int y = top - (int) scrollCur;
-                hoverTips.clear();
-                for (int i = 0; i < rows.size(); i++) {
-                        Row r = rows.get(i);
-                        int ry = y;
-                        y += r.h + GAP;
-                        int rh = r.h + GAP;
-                        if (ry + rh < top || ry > bottom) continue;
-                        boolean hovered = mouseX >= px && mouseX < px + pw
-                                        && mouseY >= Math.max(top, ry) && mouseY < Math.min(bottom, ry + r.h)
-                                        && !panelDrag && draggingSlider == null;
-                        if (hovered && !(r instanceof HeaderRow) && !(r instanceof ButtonRow)) {
-                                context.fill(px + 1, Math.max(top, ry), px + pw - 1,
-                                                Math.min(bottom, ry + r.h), 0x22FFFFFF);
+                // sidebar
+                int sw = sideW();
+                if (sw > 0) {
+                        int sy = viewTop();
+                        String active = activeSection();
+                        for (Section s : sections) {
+                                boolean hov = Gfx.in(mouseX, mouseY, px + 8, sy, sw - 8, 20);
+                                s.hover = Gfx.approach(s.hover, hov ? 1f : 0f, dt, 14f);
+                                boolean act = s.name.equals(active);
+                                int fill = act ? Gfx.SURFACE_HOVER : Gfx.lerpColor(Gfx.BG, Gfx.SURFACE_HI, s.hover);
+                                Gfx.round(c, px + 8, sy, sw - 8, 20, fill);
+                                if (act) c.fill(px + 8, sy + 4, px + 10, sy + 16, s.color);
+                                Gfx.text(c, textRenderer, s.name, px + 16, sy + 6, act ? 0xFFFFFFFF : Gfx.MUTED);
+                                sy += 23;
                         }
-                        r.draw(context, px + 2, ry, pw - 4, mouseX, mouseY, hovered);
-                        if (r.tooltip() != null) {
-                                hoverTips.add(new HoverTip(r, i));
-                        }
+                        Gfx.text(c, textRenderer, "Right-click: default", px + 12, viewBottom() - 22, Gfx.DIM);
+                        Gfx.text(c, textRenderer, "Shift+wheel: fine", px + 12, viewBottom() - 11, Gfx.DIM);
                 }
-                context.disableScissor();
 
-                // scrollbar (outside the clip)
+                // content
+                int cx = contentX(), cw = contentW(), top = viewTop(), bottom = viewBottom();
+                c.enableScissor(cx, top, cx + cw, bottom);
+                Row hovered = null;
+                for (Row r : rows) {
+                        int ry = top + r.y - (int) scrollCur;
+                        if (ry + r.h < top || ry > bottom) continue;
+                        boolean hov = r.interactive() && dragging == null && !gripDrag
+                                        && Gfx.in(mouseX, mouseY, cx, Math.max(top, ry), cw, Math.min(bottom, ry + r.h) - Math.max(top, ry));
+                        r.hover = Gfx.approach(r.hover, hov || dragging == r ? 1f : 0f, dt, 16f);
+                        if (r.interactive() && !(r instanceof ButtonRow)) {
+                                Gfx.round(c, cx, ry, cw, r.h, Gfx.lerpColor(Gfx.SURFACE, Gfx.SURFACE_HOVER, r.hover));
+                        }
+                        r.draw(c, cx, ry, cw, mouseX, mouseY, dt);
+                        if (hov) hovered = r;
+                }
+                c.disableScissor();
+
+                // scrollbar
                 if (maxScroll() > 0) {
-                        int sx = px + pw + 2;
-                        context.fill(sx, top, sx + 3, bottom, 0xFF141A28);
-                        int gy = gripY(), gh = gripH();
-                        context.fill(sx, gy, sx + 3, gy + gh,
-                                        gripDrag ? 0xFFFFFFFF : 0xFF44506B);
+                        int sx = cx + cw + 4;
+                        float span = bottom - top;
+                        float gh = Math.max(24f, span * span / Math.max(span, contentH));
+                        float gy = top + (scrollCur / maxScroll()) * (span - gh);
+                        Gfx.round(c, sx, top, 4, bottom - top, Gfx.SURFACE);
+                        Gfx.round(c, sx, (int) gy, 4, (int) gh, gripDrag ? Gfx.ACCENT : Gfx.BORDER);
                 }
 
-                context.drawCenteredTextWithShadow(textRenderer, status,
-                                this.width / 2, this.height - 32, 0xFF55FF99);
-                context.drawCenteredTextWithShadow(textRenderer,
-                                Text.literal("wheel = scroll   drag = scroll   hover = help"),
-                                this.width / 2, this.height - 40, 0xFF667799);
+                // footer
+                int fy = py + ph - 28;
+                c.fill(px + 8, fy - 3, px + pw - 8, fy - 2, Gfx.BORDER);
+                boolean fresh = now - statusMs < 2500;
+                Gfx.text(c, textRenderer, textRenderer.trimToWidth(status, pw - 130), px + 12, fy + 7, fresh ? Gfx.GOOD : Gfx.MUTED);
+                int bx = px + pw - 92, bw = 80;
+                boolean dh = Gfx.in(mouseX, mouseY, bx, fy + 1, bw, 20);
+                doneHover = Gfx.approach(doneHover, dh ? 1f : 0f, dt, 16f);
+                Gfx.button(c, textRenderer, bx, fy + 1, bw, 20, "Done", Gfx.ACCENT, doneHover, true);
 
-                // tooltips LAST (over everything, outside the scissor)
-                if (!panelDrag && draggingSlider == null) {
-                        for (HoverTip tip : hoverTips) {
-                                // hit-test in CURRENT scroll space: the row was drawn at
-                                // its on-screen position this frame — recompute it
-                                int ry = viewTop() - (int) scrollCur;
-                                for (int i = 0; i < tip.index; i++) ry += rows.get(i).h + GAP;
-                                if (mouseY >= ry && mouseY < ry + tip.row.h) {
-                                        List<Text> lines = new ArrayList<>();
-                                        for (String line : tip.row.tooltip().getString().split("\n")) {
-                                                lines.add(Text.literal(line));
-                                        }
-                                        context.drawTooltip(textRenderer, lines, mouseX, mouseY);
-                                        break;
-                                }
-                        }
+                // tooltip on top of everything
+                if (hovered != null && hovered.tip != null && dragging == null) {
+                        c.createNewRootLayer();
+                        Gfx.tooltip(c, textRenderer, hovered.label, hovered.tip, mouseX, mouseY, this.width, this.height);
                 }
+        }
+
+        private String activeSection() {
+                String name = sections.isEmpty() ? "" : sections.get(0).name;
+                for (Section s : sections) {
+                        if (s.y - scrollCur <= 30) name = s.name;
+                }
+                return name;
         }
 
         // ================================================================ input
 
         @Override
         public boolean mouseScrolled(double mouseX, double mouseY, double horizontal, double vertical) {
-                // v2.2.1: the wheel scrolls from ANYWHERE on the screen — the old
-                // panel-bounds check made the wheel feel dead whenever the cursor
-                // drifted a few pixels outside the panel (the most common way
-                // people scroll: park the mouse on the side and spin the wheel).
-                if (vertical != 0.0) {
-                        inertia = 0f;
-                        scrollTarget -= (float) vertical * 42f;
-                        scrollTarget = Math.max(0f, Math.min(maxScroll(), scrollTarget));
-                        return true;
+                boolean fine = hasShiftDown();
+                if (fine) {
+                        Row r = rowAt(mouseX, mouseY);
+                        if (r != null && r.scroll(vertical, true)) return true;
                 }
-                return super.mouseScrolled(mouseX, mouseY, horizontal, vertical);
+                scrollTarget = Math.max(0f, Math.min(maxScroll(), scrollTarget - (float) vertical * 40f));
+                return true;
         }
 
-        // v2.2.1: keyboard scrolling — arrows / PgUp / PgDn / Home / End — for
-        // anyone who prefers keys over the wheel (and trackpads with bad wheels).
+        private static boolean hasShiftDown() {
+                long h = net.minecraft.client.MinecraftClient.getInstance().getWindow().getHandle();
+                return org.lwjgl.glfw.GLFW.glfwGetKey(h, org.lwjgl.glfw.GLFW.GLFW_KEY_LEFT_SHIFT) == org.lwjgl.glfw.GLFW.GLFW_PRESS
+                                || org.lwjgl.glfw.GLFW.glfwGetKey(h, org.lwjgl.glfw.GLFW.GLFW_KEY_RIGHT_SHIFT) == org.lwjgl.glfw.GLFW.GLFW_PRESS;
+        }
+
+        private Row rowAt(double mx, double my) {
+                int cx = contentX(), cw = contentW(), top = viewTop(), bottom = viewBottom();
+                if (!Gfx.in(mx, my, cx, top, cw, bottom - top)) return null;
+                for (Row r : rows) {
+                        int ry = top + r.y - (int) scrollCur;
+                        if (my >= ry && my < ry + r.h) return r;
+                }
+                return null;
+        }
+
         @Override
         public boolean keyPressed(net.minecraft.client.input.KeyInput input) {
-                int keyCode = input.key();
-                switch (keyCode) {
-                        case org.lwjgl.glfw.GLFW.GLFW_KEY_UP -> scrollTarget -= 28f;
-                        case org.lwjgl.glfw.GLFW.GLFW_KEY_DOWN -> scrollTarget += 28f;
-                        case org.lwjgl.glfw.GLFW.GLFW_KEY_PAGE_UP -> scrollTarget -= (viewBottom() - viewTop()) * 0.8f;
-                        case org.lwjgl.glfw.GLFW.GLFW_KEY_PAGE_DOWN -> scrollTarget += (viewBottom() - viewTop()) * 0.8f;
+                int k = input.key();
+                float page = (viewBottom() - viewTop()) * 0.8f;
+                switch (k) {
+                        case org.lwjgl.glfw.GLFW.GLFW_KEY_UP -> scrollTarget -= 30f;
+                        case org.lwjgl.glfw.GLFW.GLFW_KEY_DOWN -> scrollTarget += 30f;
+                        case org.lwjgl.glfw.GLFW.GLFW_KEY_PAGE_UP -> scrollTarget -= page;
+                        case org.lwjgl.glfw.GLFW.GLFW_KEY_PAGE_DOWN -> scrollTarget += page;
                         case org.lwjgl.glfw.GLFW.GLFW_KEY_HOME -> scrollTarget = 0f;
                         case org.lwjgl.glfw.GLFW.GLFW_KEY_END -> scrollTarget = maxScroll();
                         default -> {
                                 return super.keyPressed(input);
                         }
                 }
-                inertia = 0f;
                 scrollTarget = Math.max(0f, Math.min(maxScroll(), scrollTarget));
                 return true;
         }
@@ -640,99 +673,86 @@ public final class PvpBotConfigScreen extends Screen {
         @Override
         public boolean mouseClicked(Click click, boolean doubled) {
                 double mx = click.x(), my = click.y();
-                int px = panelX(), pw = panelW();
-                int top = viewTop(), bottom = viewBottom();
-                if (mx >= px && mx < px + pw && my >= top && my < bottom) {
-                        // scrollbar grip?
-                        if (mx >= px + pw && mx < px + pw + 6) {
-                                gripDrag = true;
-                                return true;
-                        }
-                        // rows (in current scroll space)
-                        int ry = top - (int) scrollCur;
-                        for (Row r : rows) {
-                                if (my >= ry && my < ry + r.h) {
-                                        if (r.click(click, px + 2, ry, pw - 4)) {
-                                                return true;
-                                        }
-                                }
-                                ry += r.h + GAP;
-                        }
-                        // background = panel drag scroll
-                        panelDrag = true;
-                        dragStartY = my;
-                        dragStartScroll = scrollTarget;
-                        lastDragY = my;
-                        inertia = 0f;
+                int fy = py() + ph() - 28;
+                if (Gfx.in(mx, my, px() + pw() - 92, fy + 1, 80, 20)) {
+                        close();
                         return true;
                 }
-                // scrollbar track region (right of the panel)
-                if (mx >= px + pw && mx < px + pw + 8 && my >= top && my < bottom) {
+                // sidebar jump
+                if (sideW() > 0) {
+                        int sy = viewTop();
+                        for (Section s : sections) {
+                                if (Gfx.in(mx, my, px() + 8, sy, sideW() - 8, 20)) {
+                                        scrollTarget = Math.max(0f, Math.min(maxScroll(), s.y));
+                                        return true;
+                                }
+                                sy += 23;
+                        }
+                }
+                // scrollbar
+                int sx = contentX() + contentW() + 2;
+                if (maxScroll() > 0 && Gfx.in(mx, my, sx, viewTop(), 10, viewBottom() - viewTop())) {
                         gripDrag = true;
+                        gripTo(my);
                         return true;
+                }
+                Row r = rowAt(mx, my);
+                if (r != null && r.interactive()) {
+                        int ry = viewTop() + r.y - (int) scrollCur;
+                        if (click.button() == 1) {
+                                return r.resetDefault();
+                        }
+                        if (click.button() == 0) {
+                                return r.click(click, contentX(), ry, contentW());
+                        }
                 }
                 return super.mouseClicked(click, doubled);
         }
 
+        private void gripTo(double my) {
+                float span = viewBottom() - viewTop();
+                float gh = Math.max(24f, span * span / Math.max(span, contentH));
+                float n = (float) ((my - viewTop() - gh / 2) / Math.max(1f, span - gh));
+                scrollTarget = Math.max(0f, Math.min(maxScroll(), n * maxScroll()));
+                scrollCur = scrollTarget;
+        }
+
         @Override
-        public boolean mouseDragged(Click click, double deltaX, double deltaY) {
-                double mx = click.x(), my = click.y();
-                int px = panelX(), pw = panelW();
-                if (draggingSlider != null) {
-                        int ry = viewTop() - (int) scrollCur;
-                        for (Row r : rows) {
-                                if (r == draggingSlider) break;
-                                ry += r.h + GAP;
-                        }
-                        draggingSlider.drag(click, px + 2, ry, pw - 4);
+        public boolean mouseDragged(Click click, double dx, double dy) {
+                if (dragging != null) {
+                        dragging.drag(click.x(), contentX(), contentW());
                         return true;
                 }
                 if (gripDrag) {
-                        float span = viewBottom() - viewTop();
-                        float gh = gripH();
-                        float m = maxScroll();
-                        float n = span - gh <= 0 ? 0 : (float) ((my - top0()) - gh / 2f) / (span - gh);
-                        scrollTarget = Math.max(0f, Math.min(m, n * m));
-                        scrollCur = scrollTarget; // grip follows the hand 1:1
+                        gripTo(click.y());
                         return true;
                 }
-                if (panelDrag) {
-                        float d = (float) (dragStartScroll - (my - dragStartY));
-                        inertia = (float) (lastDragY - my) / Math.max(0.001f, 0.016f);
-                        scrollTarget = Math.max(0f, Math.min(maxScroll(), d));
-                        lastDragY = my;
-                        return true;
-                }
-                return super.mouseDragged(click, deltaX, deltaY);
-        }
-
-        private double top0() {
-                return viewTop();
+                return super.mouseDragged(click, dx, dy);
         }
 
         @Override
         public boolean mouseReleased(Click click) {
-                if (draggingSlider != null) {
-                        draggingSlider.release();
-                        draggingSlider = null;
+                if (dragging != null) {
+                        SliderRow s = dragging;
+                        dragging = null;
+                        saved(s.label + " = " + s.fmt(s.get.apply(cfg)));
                         return true;
                 }
                 if (gripDrag) {
                         gripDrag = false;
                         return true;
                 }
-                if (panelDrag) {
-                        panelDrag = false;
-                        // momentum flick: keep a fraction of the release velocity
-                        scrollTarget = Math.max(0f, Math.min(maxScroll(), scrollTarget + inertia * 0.12f));
-                        return true;
-                }
                 return super.mouseReleased(click);
         }
 
         @Override
+        public boolean shouldPause() {
+                return false;
+        }
+
+        @Override
         public void close() {
-                save();
+                cfg.save();
                 if (client != null) client.setScreen(parent);
         }
 }

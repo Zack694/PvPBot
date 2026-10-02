@@ -84,6 +84,10 @@ public final class HitWatcher {
                 lastTargetHealth = target != null ? target.getHealth() : -1f;
                 lastMyHitTick = lastTakenHitTick = lastAttackAttemptTick = prevAttackAttemptTick = -1000;
                 prevTheirSwing = false; // rhythm (theirAttackIntervalTicks) carries across rounds
+                // v2.3: a refill seen BEFORE the round opened (new round at full HP,
+                // first acquisition) must never settle the new round as a WIN
+                resetDetected = false;
+                attackInFlight = false;
         }
 
         public void markAttackAttempt(long tick, boolean falling, boolean sprinting) {
@@ -124,6 +128,19 @@ public final class HitWatcher {
                 // demoted to a secondary (contact-flash) signal.
                 boolean iWasHit = sHurt > lastSelfHurtTime || sh < lastSelfHealth - 0.01f;
                 float taken = 0f;
+                // v2.3 REFRACTORY WINDOW — the hurt animation (damage packet) and
+                // the health update often reach the client on DIFFERENT ticks; each
+                // used to count as its own hit (combo x2, rewards x2). A second
+                // signal within 4 ticks only adds its damage.
+                if (iWasHit && tick - lastTakenHitTick <= 4 && lastTakenHitTick > 0) {
+                        float extra = Math.max(0f, lastSelfHealth - sh);
+                        dmgTaken += extra;
+                        pendingReward -= 0.25f * extra;
+                        iWasHit = false;
+                        lastSelfHurtTime = sHurt;
+                        lastSelfHealth = sh;
+                        sh = -999f; // marker: already handled
+                }
                 if (iWasHit) {
                         taken = Math.max(0f, lastSelfHealth - sh);
                         lastTakenHitTick = tick;
@@ -144,8 +161,10 @@ public final class HitWatcher {
                         // keep comboTaken alive only during active pressure
                         if (tick - lastTakenHitTick > 40) comboTaken = 0;
                 }
-                lastSelfHurtTime = sHurt;
-                lastSelfHealth = sh;
+                if (sh != -999f) {
+                        lastSelfHurtTime = sHurt;
+                        lastSelfHealth = sh;
+                }
 
                 if (target != null) {
                         // observed hand swing: the opponent clicked. Their attack clock
@@ -174,7 +193,14 @@ public final class HitWatcher {
                         if (theyWereHit) {
                                 float dealt = Math.max(0f, lastTargetHealth - th);
                                 boolean myHit = attackInFlight && tick - attackInFlightTick <= 10;
-                                if (myHit || attributeUnclaimedHits) {
+                                boolean sameHit = lastMyHitTick > 0 && tick - lastMyHitTick <= 4
+                                                && lastMyHitTick >= attackInFlightTick;
+                                if ((myHit || attributeUnclaimedHits) && sameHit) {
+                                        // v2.3: the second half (health after hurt, or vice
+                                        // versa) of a hit already counted — damage only
+                                        dmgDealt += dealt;
+                                        pendingReward += 0.2f * dealt;
+                                } else if (myHit || attributeUnclaimedHits) {
                                         boolean crit = myHit
                                                         ? attackWasFalling && !attackWasSprinting
                                                         : !self.isOnGround() && self.getVelocity().y < 0;
@@ -206,7 +232,7 @@ public final class HitWatcher {
                         // v2.0 RESET DETECTION — a big instant refill is a practice-bot
                         // round reset (regen heals ~1 HP/s; anything above +6 HP in a
                         // single tick is a scripted restore). Settled by BotController.
-                        if (th - prevTh > 6f) {
+                        if (prevTh >= 0f && th - prevTh > 6f) {
                                 resetDetected = true;
                         }
 

@@ -65,17 +65,39 @@ public final class Humanizer {
          * continuous tracking sits at full fraction. The ease-out half is the
          * proportional settle itself (fraction x error shrinks near target).
          */
-        private int flickTicks = 0;
+        private float flickMs = 0f;
         private float lastErrMag = 0f;
 
+        /** cfg.antiWobble, never throws. */
+        private static float aw() {
+                try {
+                        return net.minecraft.util.math.MathHelper.clamp(dev.z.pvpbot.PvpBot.get().config().antiWobble, 0f, 1f);
+                } catch (Throwable ignored) {
+                        return 0.65f;
+                }
+        }
+
+        /** v2.3: max fraction of the error closed per tick — never >= 1 (no overshoot),
+         *  lower with anti-wobble. smooth (0.62-0.82) x flick boost (up to 2x) used to
+         *  reach 1.64x: every big flick overshot and swung back. */
+        private static float maxFrac() {
+                return 0.92f - 0.27f * aw();
+        }
+
         private float easeFraction(float errMag) {
+                return easeFraction(errMag, 50f);
+        }
+
+        /** v2.3: the ease clock advances in MILLISECONDS — the 120 Hz aim thread
+         *  used to finish the "3 tick" ramp in 3 calls (25 ms). */
+        private float easeFraction(float errMag, float dtMs) {
                 if (errMag > 8f && lastErrMag <= 8f) {
-                        flickTicks = 0; // new flick started
+                        flickMs = 0f; // new flick started
                 } else {
-                        flickTicks++;
+                        flickMs += dtMs;
                 }
                 lastErrMag = errMag;
-                float t = MathHelper_clamp(flickTicks / 3f, 0f, 1f);
+                float t = MathHelper_clamp(flickMs / 150f, 0f, 1f);
                 float easeIn = t * t * (3f - 2f * t); // smoothstep
                 return 0.35f + 0.65f * easeIn;
         }
@@ -96,8 +118,9 @@ public final class Humanizer {
                 curSmooth = cfg.aimSmoothMin + rng.nextFloat() * (cfg.aimSmoothMax - cfg.aimSmoothMin);
                 float boost = flickBoost(desiredYawDelta, desiredPitchDelta);
                 float ease = easeFraction(errMag);
-                float yaw = desiredYawDelta * curSmooth * boost * ease;
-                float pitch = desiredPitchDelta * curSmooth * boost * ease;
+                float k = Math.min(maxFrac(), curSmooth * boost * ease);
+                float yaw = desiredYawDelta * k;
+                float pitch = desiredPitchDelta * k;
                 float cap = cfg.aimMaxTurnDeg;
                 if (yaw > cap) yaw = cap;
                 if (yaw < -cap) yaw = -cap;
@@ -159,13 +182,15 @@ public final class Humanizer {
                         smoothRerollMs = 60f + 90f * (1f - aw) + rng.nextFloat() * 40f;
                 }
                 float boost = flickBoost(desiredYawDelta, desiredPitchDelta);
-                float ease = easeFraction(errMag);
-                float perTickYaw = desiredYawDelta * curSmooth * boost * ease;
-                float perTickPitch = desiredPitchDelta * curSmooth * boost * ease;
-                // exponential smoothing per tick -> equivalent per frame
-                float f = 1f - (float) Math.pow(1f - MathHelper_clamp(curSmooth, 0f, 0.95f), tickFrac);
-                float yaw = perTickYaw * f;
-                float pitch = perTickPitch * f;
+                float ease = easeFraction(errMag, dtMs);
+                // v2.3: ONE smoothing application. The old code multiplied the
+                // per-tick fraction by the per-frame fraction (smooth^2 per tick),
+                // with boost/ease outside the exponent. Now the per-tick fraction
+                // k (capped below 1: no overshoot) is converted to this frame's dt.
+                float k = MathHelper_clamp(curSmooth * boost * ease, 0f, maxFrac());
+                float f = 1f - (float) Math.pow(1f - k, tickFrac);
+                float yaw = desiredYawDelta * f;
+                float pitch = desiredPitchDelta * f;
                 // v2.2.0 SIGN-FLIP OSCILLATION DAMPER — 3+ direction flips of the
                 // yaw correction inside 250ms = an oscillation loop; damp the
                 // correction for the next ~200ms so it settles instead of buzzing

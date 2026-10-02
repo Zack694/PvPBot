@@ -304,7 +304,10 @@ public final class DecisionMind {
                         return;
                 }
                 sinceDeliberate++;
-                boolean emergency = hits.comboTaken >= 3 || self.getHealth() <= 6f;
+                // v2.3: emergencies re-deliberate at most every 3 ticks (low HP is a
+                // STATE — the old check re-thought at 20 Hz for the rest of the fight,
+                // flickering every technique vote)
+                boolean emergency = (hits.comboTaken >= 3 || self.getHealth() <= 6f) && sinceDeliberate >= 3;
                 if (sinceDeliberate < deliberateEvery && !emergency) {
                         intentHeldTicks++;
                         return;
@@ -514,8 +517,12 @@ public final class DecisionMind {
         }
 
         public void resetEpisode() {
-                segDmgDealt = hitsDealt;
-                segDmgTaken = hitsTaken;
+                // v2.3: HitWatcher totals restart at 0 every round — keeping last
+                // round's totals as the baseline credited the first segment with
+                // the INVERTED result of the previous round
+                hitsDealt = hitsTaken = 0f;
+                segDmgDealt = 0f;
+                segDmgTaken = 0f;
                 intentHeldTicks = 0;
                 sinceDeliberate = 0;
                 current = Intent.HOLD_POCKET;

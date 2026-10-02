@@ -508,8 +508,11 @@ public final class BotController {
                         hits.tick(self, target, tickCounter);
                         // v2.0 PHASE 1: reset-tolerant rounds — practice bots that
                         // REFILL health instead of dying still terminate the round
-                        if (inEpisode && tickCounter - hits.lastMyHitTick <= 100
-                                        && hits.dmgDealt > 0f && hits.consumeResetDetected()) {
+                        // v2.3: consumed EVERY tick (the && short-circuit left a stale
+                        // refill flag armed until the next hit -> false WIN)
+                        boolean refill = hits.consumeResetDetected();
+                        if (refill && inEpisode && tickCounter - hits.lastMyHitTick <= 100
+                                        && hits.dmgDealt > 0f) {
                                 settleRound(!diedThisEpisode ? "WIN" : "DRAW");
                                 announce("Practice bot reset detected — round settled (rewards paid). Training continues.");
                         }
@@ -845,7 +848,11 @@ public final class BotController {
                         }
                 }
                 float[] shaped = humanizer.shapeAim(self, rawYaw, rawPit);
-                addPureAimBudget(shaped[0], shaped[1]);
+                // v2.3: REPLACE the budget, never add. The tracker re-measures the
+                // full remaining error every tick, so the undelivered rest of the
+                // previous budget is already inside this tick's correction —
+                // adding it double-counted and overshot (pure-mode swinging).
+                setPureAimBudget(shaped[0], shaped[1]);
 
                 // v2.1.0 TRAINING-WHEELS REWARD SHAPING (a LEARNING signal, not an
                 // execution assist — the user asked for data/labels, never aim
@@ -1012,6 +1019,15 @@ public final class BotController {
                         float cap = Math.max(2f, cfg.aimMaxTurnDeg);
                         pureAimYawBudget = MathHelper.clamp(pureAimYawBudget + yawDeg, -cap, cap);
                         pureAimPitBudget = MathHelper.clamp(pureAimPitBudget + pitDeg, -cap, cap);
+                }
+        }
+
+        /** v2.3: overwrite the tick's aim budget (capped), locked. */
+        private void setPureAimBudget(float yawDeg, float pitDeg) {
+                synchronized (this) {
+                        float cap = Math.max(2f, cfg.aimMaxTurnDeg);
+                        pureAimYawBudget = MathHelper.clamp(yawDeg, -cap, cap);
+                        pureAimPitBudget = MathHelper.clamp(pitDeg, -cap, cap);
                 }
         }
 
@@ -1391,7 +1407,7 @@ public final class BotController {
                 //    hit (scheduled by tactics.onHurt), pressed for a single tap.
                 //    v1.0.8 RANGE GATE: only while the opponent is still close —
                 //    jumping at a far opponent does nothing ("jump when he's far" bug).
-                else if (tactics.pollJumpReset(tickCounter) && self.isOnGround() && dist <= 3.5) {
+                else if (tactics.pollJumpReset(tickCounter, self.isOnGround() && dist <= 3.5)) {
                         actuator.setJump(true);
                         lastReflexJumpTick = tickCounter;
                 }
@@ -1600,7 +1616,10 @@ public final class BotController {
                                         int patience = cfg.pureMode
                                                         ? Math.max(2, cfg.sprintGatePatiencePure)
                                                         : 60;
-                                        if (++noSprintTicks > patience) {
+                                        // v2.3: only ticks where sprint SHOULD engage count
+                                        // (forward held); strafing/backing is not "sprint broken"
+                                        boolean fwdHeld = mc.options.forwardKey.isPressed();
+                                        if (fwdHeld && ++noSprintTicks > patience) {
                                                 sprintGateBypass = true;
                                                 if (!cfg.pureMode) {
                                                         announce("Sprint unavailable (hunger/server?) — sprint-hit gate bypassed so attacks keep working.");
@@ -1608,6 +1627,7 @@ public final class BotController {
                                         }
                                 } else {
                                         noSprintTicks = 0;
+                                        if (self.isSprinting()) sprintGateBypass = false; // v2.3: sprint works again
                                         // v1.0.8: the sneak chance rolls ONLY inside the
                                         // on-target check below — rolling before it opened
                                         // sneak windows whose click never happened (the bot
@@ -1626,12 +1646,19 @@ public final class BotController {
                                                         if (!cfg.pureMode && !sneakClick && tactics.trySneakForClick(tickCounter)) {
                                                                 sneakClick = true;
                                                         }
+                                                        boolean holdForSneak = false;
                                                         if (sneakClick) {
                                                                 actuator.setSneak(true);
                                                                 if (!cfg.pureMode && tactics.consumeSneakJump()) {
                                                                         actuator.setJump(true);
                                                                 }
+                                                                // v2.3: the attack packet carries the sneak flag
+                                                                // of THIS moment — shift pressed now only applies
+                                                                // next tick, so a same-tick click was never a real
+                                                                // shift-hit. Wait until we are actually sneaking.
+                                                                holdForSneak = !self.isSneaking();
                                                         }
+                                                        if (!holdForSneak) {
                                                         // v1.0.12: the actuator re-checks the window itself at
                                                         // the physical click — the left click is BLOCKED unless
                                                         // the meter is inside [min, max] (or full), no matter
@@ -1667,6 +1694,7 @@ public final class BotController {
                                                                         }
                                                                 }
                                                         }
+                                                        } // !holdForSneak
                                                 }
                                         }
                                 }
@@ -1836,6 +1864,7 @@ public final class BotController {
                 aim.resetFight();
                 tactics.resetFight();
                 mind.resetEpisode();
+                adapt.resetEpisode(); // v2.3: stale segment baseline fix
                 sight.resetFight(); // v2.0: action/opponent rhythm buffers start clean
                 humanizer.resetPacing(); // v1.0.10: burst state never crosses rounds
                 prevMyHitTick = -1000;

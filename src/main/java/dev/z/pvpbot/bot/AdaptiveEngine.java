@@ -96,6 +96,12 @@ public final class AdaptiveEngine {
                 return e;
         }
 
+        /** v2.3: round boundary — the damage totals restart at 0, so must the segment. */
+        public void resetEpisode() {
+                segDealt = segTaken = 0f;
+                segTicks = 0;
+        }
+
         /** Opponent switched (new duel / re-engaged a different player). */
         public void switchOpponent(UUID id, String name) {
                 if (id != null && id.equals(oppId)) return; // same opponent — keep live profile

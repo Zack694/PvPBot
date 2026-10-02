@@ -5,7 +5,6 @@ import dev.z.pvpbot.PvpBot;
 import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
-import net.minecraft.client.gui.widget.ButtonWidget;
 import net.minecraft.text.Text;
 
 import java.util.ArrayList;
@@ -39,16 +38,29 @@ public final class PvpBotHudEditScreen extends Screen {
                 this.cfg = PvpBot.get().config();
         }
 
+        // v2.3: custom-drawn buttons (no Minecraft button chrome)
+        private float resetHover = 0f, doneHover = 0f;
+        private long lastFrameMs = 0L;
+
+        private int resetX() {
+                return this.width / 2 - 104;
+        }
+
+        private int doneX() {
+                return this.width / 2 + 4;
+        }
+
+        private int btnY() {
+                return this.height - 28;
+        }
+
         @Override
         protected void init() {
-                int cx = this.width / 2;
-                addDrawableChild(ButtonWidget.builder(Text.literal("Reset All"),
-                                b -> {
-                                        cfg.resetHud(null);
-                                        toast("layout reset to defaults");
-                                }).dimensions(cx - 155, this.height - 28, 100, 20).build());
-                addDrawableChild(ButtonWidget.builder(Text.literal("Done"), b -> close())
-                                .dimensions(cx + 55, this.height - 28, 100, 20).build());
+        }
+
+        @Override
+        public void renderBackground(DrawContext c, int mouseX, int mouseY, float delta) {
+                // keep the world visible behind the preview
         }
 
         private void toast(String msg) {
@@ -86,7 +98,13 @@ public final class PvpBotHudEditScreen extends Screen {
                         ctx.drawCenteredTextWithShadow(tr, Text.literal(toast.get(i)),
                                         this.width / 2, 32 + i * 10, 0xFF55FF55);
                 }
-                super.render(ctx, mouseX, mouseY, delta);
+                long now = System.currentTimeMillis();
+                float dt = lastFrameMs == 0L ? 0.016f : Math.min(0.1f, (now - lastFrameMs) / 1000f);
+                lastFrameMs = now;
+                resetHover = Gfx.approach(resetHover, Gfx.in(mouseX, mouseY, resetX(), btnY(), 100, 20) ? 1f : 0f, dt, 16f);
+                doneHover = Gfx.approach(doneHover, Gfx.in(mouseX, mouseY, doneX(), btnY(), 100, 20) ? 1f : 0f, dt, 16f);
+                Gfx.button(ctx, tr, resetX(), btnY(), 100, 20, "Reset all", 0xFF6E3A2A, resetHover, true);
+                Gfx.button(ctx, tr, doneX(), btnY(), 100, 20, "Done", Gfx.ACCENT, doneHover, true);
         }
 
         private static boolean contains(BotHud.Rect r, int x, int y) {
@@ -103,6 +121,15 @@ public final class PvpBotHudEditScreen extends Screen {
 
         @Override
         public boolean mouseClicked(Click click, boolean doubled) {
+                if (click.button() == 0 && Gfx.in(click.x(), click.y(), resetX(), btnY(), 100, 20)) {
+                        cfg.resetHud(null);
+                        toast("layout reset to defaults");
+                        return true;
+                }
+                if (click.button() == 0 && Gfx.in(click.x(), click.y(), doneX(), btnY(), 100, 20)) {
+                        close();
+                        return true;
+                }
                 if (click.button() == 0) {
                         var rects = PvpBot.get().hud().elementRects;
                         // topmost first (map order == draw order)

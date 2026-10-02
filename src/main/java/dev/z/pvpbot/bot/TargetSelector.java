@@ -57,6 +57,9 @@ public final class TargetSelector {
         }
 
         /** @return true if a valid target is currently tracked. */
+        private java.util.UUID cooldownId = null;   // v2.3: just-disengaged opponent
+        private long cooldownUntil = 0L;
+
         public boolean tick(MinecraftClient mc, boolean combatHappenedThisTick) {
                 ClientWorld world = mc.world;
                 ClientPlayerEntity self = mc.player;
@@ -78,7 +81,14 @@ public final class TargetSelector {
                                         || self.squaredDistanceTo(target) > 48.0 * 48.0
                                         || ticksWithoutCombat > cfg.disengageTicksNoCombat;
                         if (invalid) {
+                                // v2.3: a disengage for "no combat" must not re-lock the SAME
+                                // player in the same tick (the episode timeout never fired)
+                                if (target.isAlive() && ticksWithoutCombat > cfg.disengageTicksNoCombat) {
+                                        cooldownId = target.getUuid();
+                                        cooldownUntil = System.currentTimeMillis() + 3000L;
+                                }
                                 forget();
+                                return false;
                         }
                 }
 
@@ -90,6 +100,7 @@ public final class TargetSelector {
                         // players); non-player LivingEntities opt-in for practice bots
                         for (PlayerEntity p : world.getPlayers()) {
                                 if (p == self || !p.isAlive() || p.isSpectator()) continue;
+                                if (p.getUuid().equals(cooldownId) && System.currentTimeMillis() < cooldownUntil) continue;
                                 double d = self.squaredDistanceTo(p);
                                 if (d < bestD && d <= cfg.engageRadius * cfg.engageRadius) {
                                         bestD = d;

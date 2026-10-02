@@ -69,7 +69,11 @@ public final class Actuator {
 
         public void setJump(boolean on) {
                 if (on) {
-                        jumpHoldTicks = 2; // hold for 2 ticks like a human tap, then release
+                        // v2.3: press NOW and hold for 2 client ticks. The old code only
+                        // set the counter; tickPost() decremented it before the first
+                        // press, so jump was held for a single tick.
+                        set(mc.options.jumpKey, true, K_JUMP);
+                        jumpHoldTicks = 2;
                 }
         }
 
@@ -97,7 +101,15 @@ public final class Actuator {
                 }
                 attackVisualTicks = 2; // v1.0.11: light the LMB keystroke cell
                 MinecraftClientAccessor acc = (MinecraftClientAccessor) mc;
-                return acc.pvpbot$invokeDoAttack();
+                // v2.3 CRITICAL FIX — doAttack()'s boolean is "a block was broken
+                // instantly", NOT "an attack happened": for every ENTITY hit it
+                // returns false (verified in the 1.21.11 bytecode). The controller
+                // used it as "swung", so since v1.0.4 no bot hit was ever credited
+                // (no damage reward, no W-tap, no band re-roll, no attack clock).
+                // The click reached the game -> report true; the controller's
+                // meter-drain check still classifies real attacks vs miss swings.
+                acc.pvpbot$invokeDoAttack();
+                return true;
         }
 
         /**
@@ -108,8 +120,12 @@ public final class Actuator {
         private void set(KeyBinding kb, boolean on, int keyIdx) {
                 if (kb == null) return;
                 if (on) {
-                        if (!kb.isPressed()) kb.setPressed(true);
-                        botOwned[keyIdx] = true;
+                        // v2.3: only claim keys the BOT pressed — a key the user is
+                        // physically holding stays theirs (releaseAll used to cancel it)
+                        if (!kb.isPressed()) {
+                                kb.setPressed(true);
+                                botOwned[keyIdx] = true;
+                        }
                 } else if (botOwned[keyIdx]) {
                         if (kb.isPressed()) kb.setPressed(false);
                         botOwned[keyIdx] = false;
@@ -171,6 +187,9 @@ public final class Actuator {
                 float countsPerDeg = 1f / (f * f * f * 8.0f * 0.15f); // deg per count inverted
                 double yawCounts = pend[0] * countsPerDeg;
                 double pitchCounts = pend[1] * countsPerDeg;
+                // v2.3: vanilla applies the invert-mouse options to cursor deltas
+                if (mc.options.getInvertMouseX().getValue()) yawCounts = -yawCounts;
+                if (mc.options.getInvertMouseY().getValue()) pitchCounts = -pitchCounts;
                 if (Math.abs(yawCounts) < 1e-4 && Math.abs(pitchCounts) < 1e-4) {
                         return;
                 }
@@ -181,6 +200,11 @@ public final class Actuator {
                         // real GLFW mouse-move event, processed by the vanilla input
                         // pipeline — fractional deltas preserved end to end
                         mouse.pvpbot$onCursorPos(mc.getWindow().getHandle(), x + yawCounts, y + pitchCounts);
+                        // v2.3: put the stored cursor back where GLFW's real cursor is,
+                        // so the next real/launcher cursor event cannot "undo" the turn
+                        // (the delta is already queued in cursorDeltaX/Y)
+                        mouse.pvpbot$setX(x);
+                        mouse.pvpbot$setY(y);
                 } catch (Throwable ignored) {
                         // never crash the game over input injection
                 }

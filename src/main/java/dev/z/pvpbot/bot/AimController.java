@@ -97,6 +97,7 @@ public final class AimController {
         private float errEmaYaw = 0f, errEmaPit = 0f;
         private boolean errEmaInit = false;
         private float lastTimeSec = -1f;
+        private Vec3d smPoint = null;   // v2.3: smoothed aim point (anti-wobble without feedback lag)
 
         // supervised sample queue: features -> label arrives 3 ticks later
         private static final class Sample {
@@ -247,8 +248,8 @@ public final class AimController {
         private void noteTargetMotion(LivingEntity t, long tick) {
                 if (tick == lastMotionTick) return; // same game tick — keep the estimate
                 lastMotionTick = tick;
-                vxHist[velHistIdx] = (float) TargetMotion.of(t).x;
-                vzHist[velHistIdx] = (float) TargetMotion.of(t).z;
+                vxHist[velHistIdx] = (float) TargetMotion.smoothed(t).x;
+                vzHist[velHistIdx] = (float) TargetMotion.smoothed(t).z;
                 velHistIdx = (velHistIdx + 1) % vxHist.length;
                 if (velHistIdx == 0) velHistFull = true;
                 if (velHistFull) {
@@ -285,48 +286,38 @@ public final class AimController {
          * — the old hurtTime freeze only stopped the wander, not the lead).
          */
         private Vec3d leadPoint(LivingEntity t, double myDist) {
-                int lead = 0;
-                boolean predict = true;
+                int lead = 2;
+                float aw = antiWobble();
                 try {
-                        dev.z.pvpbot.BotConfig c = dev.z.pvpbot.PvpBot.get().config();
-                        lead = c.aimLeadTicks;
-                        predict = c.aimPredict;
+                        lead = dev.z.pvpbot.PvpBot.get().config().aimLeadTicks;
                 } catch (Throwable ignored) {
-                        lead = 2;
                 }
-                float vx = (float) TargetMotion.of(t).x, vz = (float) TargetMotion.of(t).z;
-                float vy = (float) TargetMotion.of(t).y;
                 if (lead <= 0) return new Vec3d(t.getX(), t.getY(), t.getZ());
-                float lf = lead;
-                float px, pz;
-                if (predict) {
-                        px = (float) t.getX() + vx * lf + 0.5f * accX * lf * lf;
-                        pz = (float) t.getZ() + vz * lf + 0.5f * accZ * lf * lf;
-                } else {
-                        px = (float) t.getX() + vx * lead;
-                        pz = (float) t.getZ() + vz * lead;
+                // v2.3 AIM FIX — the lead now reads the SMOOTHED measured velocity
+                // and no longer adds the quadratic acceleration term. Until v2.3
+                // the lead silently ran on getVelocity() (~0 for remote players),
+                // so online it never moved the aim at all; once it got REAL
+                // per-tick deltas (network-paced, jittery) the lead + 0.5*a*t^2
+                // swung the aim point by up to a block per tick. Calm = less lead:
+                // the anti-wobble dial scales it down to 40% at max.
+                Vec3d v = TargetMotion.smoothed(t);
+                float lf = lead * (1f - 0.6f * aw);
+                double lx = v.x * lf, lz = v.z * lf;
+                double mag = Math.sqrt(lx * lx + lz * lz);
+                double cap = Math.min(0.30, 0.05 + 0.10 * Math.max(0.8, myDist));
+                if (mag > cap && mag > 1e-6) {
+                        lx *= cap / mag;
+                        lz *= cap / mag;
                 }
-                // range cap on the horizontal lead (blocks): never aim further
-                // ahead than a third of the gap — point-blank lead = aiming at air
-                float leadX = px - (float) t.getX(), leadZ = pz - (float) t.getZ();
-                float leadMag = (float) Math.sqrt(leadX * leadX + leadZ * leadZ);
-                float cap = (float) (0.35 * Math.max(0.8, myDist));
-                if (leadMag > cap && leadMag > 1e-4f) {
-                        float k = cap / leadMag;
-                        px = (float) t.getX() + leadX * k;
-                        pz = (float) t.getZ() + leadZ * k;
-                }
-                // v1.0.9c gravity-aware, KB-zeroed, capped vertical lead
+                // gravity-aware, KB-zeroed, capped vertical lead (half strength)
                 float vlead;
                 if (t.hurtTime > 2) {
-                        vlead = 0f; // KB: aim forward, never chase the launch
+                        vlead = 0f;
                 } else {
-                        vlead = vy * lf - 0.5f * 0.08f * lf * lf;
-                        if (vlead > 0.40f) vlead = 0.40f;
-                        if (vlead < -0.60f) vlead = -0.60f;
+                        vlead = 0.5f * ((float) v.y * lf - 0.5f * 0.08f * lf * lf);
+                        vlead = Math.max(-0.40f, Math.min(0.25f, vlead));
                 }
-                float py = (float) t.getY() + vlead;
-                return new Vec3d(px, py, pz);
+                return new Vec3d(t.getX() + lx, t.getY() + vlead, t.getZ() + lz);
         }
 
         /** @return desired yaw/pitch delta in degrees this tick (raw — humanizer shapes it) */
@@ -415,7 +406,7 @@ public final class AimController {
                 // (a ±0.02-block sliver remains, so it never looks locked).
                 float wanderScale = 1f - 0.85f * aw;
                 // features describe the opponent's motion (what a human reads)
-                Vec3d tgtVel = TargetMotion.of(target);
+                Vec3d tgtVel = TargetMotion.smoothed(target);
                 noteTargetMotion(target, tick); // v2.2.0: tick-gated + EMA'd accel
                 float yawRad = (float) Math.toRadians(self.getYaw());
                 float fx = -MathHelper.sin(yawRad), fz = MathHelper.cos(yawRad);
@@ -431,7 +422,25 @@ public final class AimController {
                 // opponent is about to jump, the crosshair already drifts up to
                 // where their head will be ("predict from the opponent's memory").
                 // v2.2.0: one shared pipeline (wander + lead + sneak/jump + gates)
-                Vec3d aimPoint = finalAimPoint(self, target, tick, wanderScale, opp);
+                Vec3d rawPoint = finalAimPoint(self, target, tick, wanderScale, opp);
+                // v2.3 ANTI-WOBBLE, DONE RIGHT — smooth the AIM POINT in world
+                // space, then measure the error to it LIVE. v2.2 smoothed the
+                // measured ERROR instead: that delays the feedback of a
+                // proportional controller, so the crosshair kept moving after it
+                // had already arrived and overshot — MORE anti-wobble meant MORE
+                // lag and MORE oscillation. Smoothing the point removes the
+                // point's jitter without adding any feedback delay.
+                float dtSec = lastTimeSec < 0f ? 0.05f : MathHelper.clamp(timeSeconds - lastTimeSec, 0.001f, 0.25f);
+                lastTimeSec = timeSeconds;
+                float tau = 0.015f + 0.085f * aw; // 15ms (raw) .. 100ms (max calm)
+                float alpha = 1f - (float) Math.exp(-dtSec / tau);
+                if (!errEmaInit || smPoint == null || smPoint.squaredDistanceTo(rawPoint) > 4.0) {
+                        smPoint = rawPoint;
+                        errEmaInit = true;
+                } else {
+                        smPoint = smPoint.add(rawPoint.subtract(smPoint).multiply(alpha));
+                }
+                Vec3d aimPoint = smPoint;
                 double adx = aimPoint.x - self.getX();
                 double adz = aimPoint.z - self.getZ();
                 float adist = (float) Math.sqrt(adx * adx + adz * adz);
@@ -440,26 +449,8 @@ public final class AimController {
                 float dy = (float) (aimPoint.y - self.getEyePos().y);
                 float targetPitch = (float) Math.toDegrees(Math.atan2(-dy, Math.max(0.1f, adist)));
                 float pitchErr = MathHelper.wrapDegrees(targetPitch - self.getPitch());
-
-                // v2.2.0 ANTI-WOBBLE ERROR EMA — the measured error is smoothed in
-                // the TIME domain (frame-rate independent exponential), so the
-                // crosshair chases a calm estimate of the error instead of every
-                // per-frame jitter of the moving wander point / noisy accel. At
-                // antiWobble=1 the time constant is ~50ms — still fast enough to
-                // track real strafes (a strafe changes the error smoothly), but it
-                // erases the per-frame zigzag completely.
-                float dtSec = lastTimeSec < 0f ? 0.05f : MathHelper.clamp(timeSeconds - lastTimeSec, 0.001f, 0.25f);
-                lastTimeSec = timeSeconds;
-                float tau = 0.008f + 0.042f * aw; // 8ms (raw) .. 50ms (max calm)
-                float alpha = 1f - (float) Math.exp(-dtSec / tau);
-                if (!errEmaInit) {
-                        errEmaYaw = yawErr;
-                        errEmaPit = pitchErr;
-                        errEmaInit = true;
-                } else {
-                        errEmaYaw += alpha * (yawErr - errEmaYaw);
-                        errEmaPit += alpha * (pitchErr - errEmaPit);
-                }
+                errEmaYaw = yawErr;
+                errEmaPit = pitchErr;
                 float smYawErr = errEmaYaw, smPitchErr = errEmaPit;
 
                 // v2.2.0: strafe history is ALSO tick-gated (it fed the net a
@@ -536,18 +527,23 @@ public final class AimController {
                 } else if (angErr > 25f) {
                         assist = Math.max(assist, 0.85f);
                 }
-                float outYaw = (1f - assist) * predYawErr + assist * smYawErr;
+                // v2.3: the net's authority is BOUNDED and actually applied (v2.2
+                // computed a clamped netYaw but then used the unclamped value, so a
+                // saturated/stale prediction could push ±45° of wrong-side yaw).
+                // Small errors (on the body) allow only ~2° of net influence.
+                float netLimit = 2f + 10f * MathHelper.clamp((angErr - 5f) / 20f, 0f, 1f);
                 // v1.0.9c: the net's PITCH influence is hard-bounded to ±8° —
                 // it trained on the old above-the-head labels and learned an
                 // upward bias; the measured error now owns the vertical axis
                 // (yaw keeps full net authority for leading runners)
-                float netPitch = MathHelper.clamp((1f - assist) * predPitchErr, -8f, 8f);
+                float netPitch = MathHelper.clamp((1f - assist) * predPitchErr, -Math.min(8f, netLimit), Math.min(8f, netLimit));
                 // v2.2.0: the net's YAW influence is now bounded too (±12°) — a
                 // stale/overtrained prediction pushed up to ±27° of wrong-side
                 // authority at large errors (0.15 * ±180) and that pushed the
                 // crosshair OFF the body exactly when the target crossed to the
                 // left/right. The measured error stays the owner of large corrections.
-                float netYaw = MathHelper.clamp((1f - assist) * predYawErr, -12f, 12f);
+                float netYaw = MathHelper.clamp((1f - assist) * predYawErr, -netLimit, netLimit);
+                float outYaw = netYaw + assist * smYawErr;
                 float outPitch = netPitch + assist * smPitchErr;
 
                 float desiredPitch = MathHelper.clamp(self.getPitch() + outPitch, -89f, 89f);
@@ -617,6 +613,7 @@ public final class AimController {
                 hasPending = false;
                 // v2.2.0: calm state starts fresh per fight
                 errEmaInit = false;
+                smPoint = null;
                 errEmaYaw = 0f;
                 errEmaPit = 0f;
                 lastTimeSec = -1f;

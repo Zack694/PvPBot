@@ -39,14 +39,20 @@ class Tracker:
     def __init__(self, rng, skill=1.0, learner=False):
         self.rng = rng
         u = rng.uniform
+        self.learner = learner
+        self.vs = (0.0, 0.0)
         if learner:
+            # v2.3 mod aim pipeline: smoothed-velocity lead x (1 - 0.6*aw), capped
+            # at min(0.3, 0.05 + 0.1*d); per-tick fraction capped at 0.92 - 0.27*aw
+            self.aw = u(0.3, 1.0)
             self.smin = u(0.45, 0.62)
             self.smax = self.smin + u(0.12, 0.22)
             self.cap = u(40.0, 55.0)
-            self.noise = 0.12
+            self.noise = 0.12 * (1.0 - 0.85 * self.aw)
             self.err_sigma = u(0.2, 0.9)      # aim-net / wander imperfection
-            self.lead = 2.0
+            self.lead = 2.0 * (1.0 - 0.6 * self.aw)
             self.zone = (0.75, 0.93)
+            self.kmax = 0.92 - 0.27 * self.aw
         else:
             s = skill
             self.smin = 0.2 + 0.45 * s * u(0.7, 1.0)
@@ -57,6 +63,7 @@ class Tracker:
             self.lead = u(0.0, 2.5) * s
             lo = u(0.45, 0.8)
             self.zone = (lo, min(0.95, lo + u(0.05, 0.2)))
+            self.kmax = 1.6   # humans/bots may overshoot
         self.max_deg = 40.0
         self.phase = u(0, 6.28)
         self.flick_ticks = 0
@@ -69,9 +76,14 @@ class Tracker:
         """Raw tracker correction (deg) toward the aim point on the viewed target."""
         frac = self.zone[0] + (self.zone[1] - self.zone[0]) * (0.5 + 0.5 * math.sin(self.phase + t * 0.09))
         d = math.hypot(view.x - me.x, view.z - me.z)
-        lx, lz = vel[0] * self.lead, vel[1] * self.lead
+        if self.learner:
+            self.vs = (self.vs[0] + 0.35 * (vel[0] - self.vs[0]), self.vs[1] + 0.35 * (vel[1] - self.vs[1]))
+            lx, lz = self.vs[0] * self.lead, self.vs[1] * self.lead
+            cap = min(0.30, 0.05 + 0.10 * max(0.8, d))
+        else:
+            lx, lz = vel[0] * self.lead, vel[1] * self.lead
+            cap = 0.35 * max(0.8, d)
         lm = math.hypot(lx, lz)
-        cap = 0.35 * max(0.8, d)
         if lm > cap and lm > 1e-6:
             lx, lz = lx * cap / lm, lz * cap / lm
         px, pz = view.x + lx, view.z + lz
@@ -99,8 +111,9 @@ class Tracker:
         self.last_err = mag
         tt = min(1.0, self.flick_ticks / 3.0)
         ease = 0.35 + 0.65 * (tt * tt * (3 - 2 * tt))
-        y = max(-self.cap, min(self.cap, dy * smooth * boost * ease))
-        p = max(-self.cap, min(self.cap, dp * smooth * boost * ease))
+        k = min(self.kmax, smooth * boost * ease)
+        y = max(-self.cap, min(self.cap, dy * k))
+        p = max(-self.cap, min(self.cap, dp * k))
         if dy != 0.0 or dp != 0.0:
             y += self.rng.uniform(-1, 1) * self.noise
             p += self.rng.uniform(-1, 1) * self.noise
