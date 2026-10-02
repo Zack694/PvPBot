@@ -43,10 +43,11 @@ class Replay:
               ("aim", (2,), np.float32), ("click", (), np.float32), ("R", (), np.float32),
               ("gN", (), np.float32))
 
-    def __init__(self, cap, alpha=0.6, seed=0):
+    def __init__(self, cap, alpha=0.6, seed=0, dim=100):
         self.cap = cap
         self.alpha = alpha
-        self.data = {k: np.zeros((cap,) + shp, dtype=dt) for k, shp, dt in self.FIELDS}
+        fields = [(k, (dim,) if k in ("s", "s2") else shp, dt) for k, shp, dt in self.FIELDS]
+        self.data = {k: np.zeros((cap,) + shp, dtype=dt) for k, shp, dt in fields}
         self.tree = SumTree(cap)
         self.head = 0
         self.size = 0

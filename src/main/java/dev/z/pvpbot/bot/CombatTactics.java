@@ -275,6 +275,55 @@ public final class CombatTactics {
                 return wtapTicksLeft > 0;
         }
 
+        /**
+         * v2.3: +1 = strafe right, -1 = strafe left — the side that pushes me
+         * further from their look direction (they must turn more to track me).
+         */
+        private static int escapeSideFromTheirAim(ClientPlayerEntity self, LivingEntity target) {
+                double ty = Math.toRadians(target.getYaw());
+                double lx = -Math.sin(ty), lz = Math.cos(ty);           // their horizontal look
+                double dx = self.getX() - target.getX(), dz = self.getZ() - target.getZ();
+                double along = dx * lx + dz * lz;
+                double px = dx - along * lx, pz = dz - along * lz;      // my offset off their aim line
+                double yr = Math.toRadians(self.getYaw());
+                double rx = -Math.cos(yr), rz = -Math.sin(yr);          // my right
+                double side = px * rx + pz * rz;
+                if (Math.abs(side) < 1e-3) return (self.age / 20) % 2 == 0 ? 1 : -1;
+                return side > 0 ? 1 : -1;
+        }
+
+        /**
+         * v2.3: their OWN take-off (not a knockback launch) inside crit range
+         * opens the crit-denial window until they land (max 14 ticks).
+         */
+        public void noteTarget(LivingEntity target, double horizontalDist, int comboTaken) {
+                comboTakenNow = comboTaken;
+                boolean air = !target.isOnGround();
+                double vy = TargetMotion.of(target).y;
+                if (air && !targetAirPrev && vy > 0.2 && target.hurtTime < 9
+                                && horizontalDist > 1.2 && horizontalDist < 4.2) {
+                        critDenialTicksLeft = 14;
+                        critDenialCount++;
+                }
+                targetAirPrev = air;
+        }
+
+        /** v2.3: a crit-denial window is open (technique jumps stay off). */
+        public boolean critDenialActive() {
+                return critDenialTicksLeft > 0;
+        }
+
+        /** v2.3: the combo breaker is steering (technique jumps stay off; jump reset still fires). */
+        public boolean comboBreakActive() {
+                return comboBreakTicksLeft > 0;
+        }
+
+        private int comboTakenNow = 0;
+        private int comboBreakTicksLeft = 0, comboBreakDir = 1;
+        private int critDenialTicksLeft = 0;
+        private boolean targetAirPrev = false;
+        public int critDenialCount = 0;
+
         /** Pick the most open escape direction, weighted AWAY from the opponent. */
         private void pickEscapeDirection(ClientPlayerEntity self, LivingEntity target) {
                 double awayX = self.getX() - target.getX();
@@ -466,6 +515,44 @@ public final class CombatTactics {
                                 return escapeMove;
                         }
                         escapeTicksLeft = 0;
+                }
+
+                // ---- v2.3 COMBO BREAKER: we have taken 2+ hits in a row. Running
+                // straight back keeps us in their line (the classic way to get
+                // comboed to death); a sprint-strafe toward the side their aim is
+                // weakest makes them turn to follow, breaks the KB chain and lets
+                // the jump reset + our TriggerBot trade back.
+                if (cfg.comboBreaker && comboTakenNow >= 2 && horizontalDist < 4.0) {
+                        if (comboBreakTicksLeft <= 0) {
+                                comboBreakTicksLeft = 8 + rng.nextInt(5);
+                                comboBreakDir = escapeSideFromTheirAim(self, target);
+                        }
+                        comboBreakTicksLeft--;
+                        if (comboBreakDir > 0 && (blocked[1] > 0.5f || blocked[2] > 0.5f)) comboBreakDir = -1;
+                        else if (comboBreakDir < 0 && (blocked[7] > 0.5f || blocked[6] > 0.5f)) comboBreakDir = 1;
+                        return comboBreakDir > 0 ? ActionSpace.M_WD : ActionSpace.M_WA;
+                }
+                comboBreakTicksLeft = 0;
+
+                // ---- v2.3 CRIT DENIAL: they took off (own jump, not knockback)
+                // inside crit range. While they are airborne they cannot steer —
+                // hold the EDGE of reach (~3 blocks) so the falling crit comes up
+                // short or has to drift into our grounded sprint hit, and never
+                // jump to trade crits. The TriggerBot clicks the moment they
+                // enter reach.
+                if (cfg.critDenial && critDenialTicksLeft > 0) {
+                        critDenialTicksLeft--;
+                        if (target.isOnGround()) {
+                                critDenialTicksLeft = 0;
+                        } else if (horizontalDist < 2.6) {
+                                boolean wallBack = blocked[3] > 0.5f || blocked[4] > 0.5f || blocked[5] > 0.5f;
+                                if (!wallBack) return (tick / 3) % 2 == 0 ? ActionSpace.M_SA : ActionSpace.M_SD;
+                                return escapeSideFromTheirAim(self, target) > 0 ? ActionSpace.M_D : ActionSpace.M_A;
+                        } else if (horizontalDist > 3.3) {
+                                return ActionSpace.M_W;
+                        } else {
+                                return escapeSideFromTheirAim(self, target) > 0 ? ActionSpace.M_D : ActionSpace.M_A;
+                        }
                 }
 
                 // ---- over-retreat governor (v1.0.6): the "backs up TOOOOO much"
@@ -687,6 +774,7 @@ public final class CombatTactics {
         /** Physical eligibility shared by the crit attempt paths. */
         private boolean critEligible(long tick) {
                 if (aggressionHint < 0) return false;
+                if (critDenialTicksLeft > 0 || comboBreakTicksLeft > 0) return false; // v2.3
                 if (wtapTicksLeft > 0) return false; // v1.0.5: never jump inside the wtap window
                 if (backoffActive) return false;     // v1.0.6: NEVER jump while backing off
                 if (escapeTicksLeft > 0) return false;
@@ -758,6 +846,7 @@ public final class CombatTactics {
         /** Physical eligibility shared by the midair hit paths. */
         private boolean midAirEligible(long tick) {
                 if (aggressionHint < 0) return false;
+                if (comboBreakTicksLeft > 0) return false; // v2.3
                 if (wtapTicksLeft > 0) return false;
                 if (backoffActive) return false;
                 if (escapeTicksLeft > 0) return false;
@@ -878,6 +967,10 @@ public final class CombatTactics {
                 sprintJumpChase = false;
                 chaseDist = 99f;
                 critWindowTicksLeft = 0; // v1.0.10
+                comboBreakTicksLeft = 0;  // v2.3
+                critDenialTicksLeft = 0;
+                targetAirPrev = false;
+                comboTakenNow = 0;
                 lastChaseHopTick = -1000;
         }
 

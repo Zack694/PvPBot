@@ -33,13 +33,20 @@ import torch  # noqa: E402
 import torch.multiprocessing as mp  # noqa: E402
 
 from net import ARCH, MOVES, SPRINT_OFF, JUMP_OFF, SNEAK_OFF, AIM_OFF, CLICK_OFF  # noqa: E402
+
+ARCH_V1 = [64, 480, 480, 72]
 from net import build_torch, torch_to_numpy, numpy_to_torch, np_forward, decide, save_pbm, load_pbm  # noqa: E402
 from replay import Replay  # noqa: E402
 
-PRESETS = [None, None, None, "practice", "practice", "crit", "kiter", "jitter"]
+# v2.3.2 adaptive curriculum: base weights, scaled up for opponent types the
+# brain currently loses to (per-actor win-rate EMA)
+CURRICULUM = {None: 3.0, "practice": 2.0, "crit": 1.0, "critpro": 1.5, "combo": 1.5, "kiter": 1.0, "jitter": 1.0}
+PRESETS = list(CURRICULUM.keys())
 BENCH = [("scripted", None, 101), ("scripted", None, 202), ("scripted", "practice", 303),
          ("scripted", "practice", 404), ("scripted", "crit", 505), ("scripted", "kiter", 606),
-         ("scripted", "jitter", 707), ("scripted", None, 808)]
+         ("scripted", "jitter", 707), ("scripted", None, 808),
+         ("scripted", "critpro", 909), ("scripted", "combo", 1010)]
+BENCH_SIG = "v2.3.2-10"
 
 
 def default_cfg():
@@ -76,15 +83,20 @@ class NStep:
             self.buf.pop(0)
 
 
-def pack(items):
+def pack(items, dim=100):
     n = len(items)
-    b = {"s": np.zeros((n, 100), np.float32), "s2": np.zeros((n, 100), np.float32),
+    b = {"s": np.zeros((n, dim), np.float32), "s2": np.zeros((n, dim), np.float32),
          "move": np.zeros(n, np.int8), "sprint": np.zeros(n, np.int8), "jump": np.zeros(n, np.int8),
          "sneak": np.zeros(n, np.int8), "aim": np.zeros((n, 2), np.float32), "click": np.zeros(n, np.float32),
          "R": np.zeros(n, np.float32), "gN": np.zeros(n, np.float32)}
     for i, (s, act, lab, R, s2, g) in enumerate(items):
         b["s"][i] = s
         b["s2"][i] = s2
+        if lab is None:          # v1: one 72-way action index
+            b["move"][i] = act
+            b["R"][i] = R
+            b["gN"][i] = g
+            continue
         b["move"][i] = act[0]
         b["sprint"][i] = 1 if act[1] else 0
         b["jump"][i] = 1 if act[2] else 0
@@ -94,6 +106,15 @@ def pack(items):
         b["R"][i] = R
         b["gN"][i] = g
     return b
+
+
+def decide_any(q, eps, side, rng):
+    """v2: four-head decision dict. v1: epsilon-greedy index over 72 actions."""
+    if side.kind == "v1":
+        if rng.random() < eps:
+            return int(rng.integers(0, len(q)))
+        return int(np.argmax(q))
+    return decide(q, eps, side.held, rng)
 
 
 def list_league(league_dir):
@@ -120,6 +141,7 @@ def actor_main(aid, shared, version, q, stop, cfg, seed, league_dir):
         slots.append({"eps": eps, "m": None, "ns": {}, "opp_w": None})
     out = []
     stats = []
+    win_ema = {}
     last_flush = time.time()
 
     def new_match(slot):
@@ -128,8 +150,9 @@ def actor_main(aid, shared, version, q, stop, cfg, seed, league_dir):
         lc.band_max = float(min(1.0, lc.band_min + rng.uniform(0.06, 0.18)))
         lc.react_min = 1
         lc.react_max = int(rng.integers(1, 4))
+        brain = cfg.get("brain", "v2")
         if rng.random() < cfg["selfplay"]:
-            m = Match(rng, opponent="policy", learner_cfg=lc)
+            m = Match(rng, opponent="policy", learner_cfg=lc, brain=brain)
             files = list_league(league_dir)
             if files and rng.random() < 0.6:
                 fn = files[int(rng.integers(0, len(files)))]
@@ -143,7 +166,9 @@ def actor_main(aid, shared, version, q, stop, cfg, seed, league_dir):
             else:
                 slot["opp_w"] = None   # latest weights
         else:
-            m = Match(rng, opponent="scripted", preset=PRESETS[int(rng.integers(0, len(PRESETS)))], learner_cfg=lc)
+            wts = np.asarray([CURRICULUM[k] * (1.3 - win_ema.get(k, 0.5)) for k in PRESETS])
+            pr = PRESETS[int(rng.choice(len(PRESETS), p=wts / wts.sum()))]
+            m = Match(rng, opponent="scripted", preset=pr, learner_cfg=lc, brain=brain)
             slot["opp_w"] = None
         slot["m"] = m
         slot["ns"] = {"a": NStep(cfg["nstep"], cfg["gamma"]), "b": NStep(cfg["nstep"], cfg["gamma"])}
@@ -172,13 +197,13 @@ def actor_main(aid, shared, version, q, stop, cfg, seed, league_dir):
                 si, name, _ = obs_list[k]
                 side = slots[si]["m"].a if name == "a" else slots[si]["m"].b
                 eps = slots[si]["eps"] if name == "a" else 0.02
-                heads[si][name] = decide(Q[qi], eps, side.held, rng)
+                heads[si][name] = decide_any(Q[qi], eps, side, rng)
         for k, (si, name, vec) in enumerate(obs_list):
             if name in heads[si]:
                 continue
             ow = slots[si]["opp_w"]
             qv = np_forward(ow[0], ow[1], np.asarray(vec, np.float32)[None, :])[0]
-            heads[si][name] = decide(qv, 0.02, slots[si]["m"].b.held, rng)
+            heads[si][name] = decide_any(qv, 0.02, slots[si]["m"].b, rng)
         # act
         for si, s in enumerate(slots):
             m = s["m"]
@@ -189,13 +214,16 @@ def actor_main(aid, shared, version, q, stop, cfg, seed, league_dir):
                 s["ns"][name].push(st, act, lab, r, s2, done, trunc, out)
             if rr is not None:
                 res, sa, sb = rr
+                if m.opponent != "policy":
+                    k = m.preset
+                    win_ema[k] = win_ema.get(k, 0.5) + 0.05 * ((1.0 if res == "WIN" else 0.0) - win_ema.get(k, 0.5))
                 stats.append((m.opponent if m.opponent == "policy" else (m.preset or "scripted"), res,
                               sa["dealt"], sa["taken"], sa["hits"], sa["swings"]))
             if m.result is not None:
                 new_match(s)
         if len(out) >= 1024 or (out and time.time() - last_flush > 2.0):
             try:
-                q.put(("data", pack(out)), timeout=5)
+                q.put(("data", pack(out, cfg.get("dim", 100))), timeout=5)
             except pyqueue.Full:
                 pass
             out = []
@@ -206,7 +234,7 @@ def actor_main(aid, shared, version, q, stop, cfg, seed, league_dir):
 
 
 # =================================================================== evaluator
-def evaluate_weights(ws, bs, rounds_per=6, seed0=0):
+def evaluate_weights(ws, bs, rounds_per=6, seed0=0, brain="v2"):
     from env import Match
     res = {}
     for kind, preset, seed in BENCH:
@@ -215,13 +243,13 @@ def evaluate_weights(ws, bs, rounds_per=6, seed0=0):
         dealt = taken = 0.0
         r_done = 0
         while r_done < rounds_per:
-            m = Match(rng, opponent=kind, preset=preset, rounds=rounds_per - r_done)
+            m = Match(rng, opponent=kind, preset=preset, rounds=rounds_per - r_done, brain=brain)
             while m.result is None:
                 o = m.observe()
                 heads = {}
                 for name, vec in o.items():
                     qv = np_forward(ws, bs, np.asarray(vec, np.float32)[None, :])[0]
-                    heads[name] = decide(qv, 0.0, m.a.held, rng)
+                    heads[name] = decide_any(qv, 0.0, m.a, rng)
                 _, rr = m.act(heads)
                 if rr is not None:
                     r_done += 1
@@ -250,7 +278,7 @@ def eval_main(shared, version, q, stop, cfg):
             continue
         arrs = [p.detach().numpy().copy() for p in shared]
         ws, bs = arrs[0::2], arrs[1::2]
-        r = evaluate_weights(ws, bs, cfg["eval_rounds"], seed0=0)
+        r = evaluate_weights(ws, bs, cfg["eval_rounds"], seed0=0, brain=cfg.get("brain", "v2"))
         r["version"] = v
         q.put(("eval", r, ws, bs))
         last = v
@@ -267,7 +295,34 @@ def huber(x, d):
     return torch.where(a <= d, 0.5 * x * x, d * (a - 0.5 * d))
 
 
+def train_step_v1(model, target, opt, rb, cfg, beta):
+    idx, b, w = rb.sample(cfg["batch"], beta)
+    s = torch.from_numpy(b["s"])
+    s2 = torch.from_numpy(b["s2"])
+    a = torch.from_numpy(b["move"].astype(np.int64))
+    R = torch.from_numpy(b["R"])
+    gN = torch.from_numpy(b["gN"])
+    W = torch.from_numpy(w)
+    ar = torch.arange(len(R))
+    with torch.no_grad():
+        a2 = model(s2).argmax(1)
+        y = R + gN * target(s2)[ar, a2]
+    td = model(s)[ar, a] - y
+    loss = (W * huber(td, cfg["huber"])).mean()
+    opt.zero_grad(set_to_none=True)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["grad_clip"])
+    opt.step()
+    with torch.no_grad():
+        for pt, p in zip(target.parameters(), model.parameters()):
+            pt.mul_(1 - cfg["tau"]).add_(p, alpha=cfg["tau"])
+    rb.update_priorities(idx, td.detach().numpy())
+    return float(loss.item()), 0.0, 0.0, float(td.abs().mean().item())
+
+
 def train_step(model, target, opt, rb, cfg, beta):
+    if cfg.get("brain", "v2") == "v1":
+        return train_step_v1(model, target, opt, rb, cfg, beta)
     idx, b, w = rb.sample(cfg["batch"], beta)
     s = torch.from_numpy(b["s"])
     s2 = torch.from_numpy(b["s2"])
@@ -308,6 +363,19 @@ def train_step(model, target, opt, rb, cfg, beta):
     return float(loss.item()), float(aim_l.item()), float(click_l.item()), float(td.abs().mean().item())
 
 
+def export_v1_json(path, ws, bs, state):
+    """Dqn.fromJson format: {"q": {"arch": [...], "layers": [{"w": rows, "b": vec}]}}."""
+    sizes = [int(ws[0].shape[1])] + [int(w.shape[0]) for w in ws]
+    out = {"schema": 1,
+           "meta": {"trainedBy": "PvPBot v2.3 v3-simulator fine-tune (vanilla 1.21 physics, latency, randomized opponents, self-play league, PER double-DQN)",
+                    "trainSteps": int(state["steps"]), "trainMinutes": round(state["seconds"] / 60.0, 1)},
+           "q": {"arch": sizes, "layers": [{"w": [[float(x) for x in row] for row in w], "b": [float(x) for x in b]}
+                                          for w, b in zip(ws, bs)]}}
+    with open(path + ".tmp", "w") as fh:
+        json.dump(out, fh, separators=(",", ":"))
+    os.replace(path + ".tmp", path)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", default=os.path.join(HERE, "..", "runs", "main"))
@@ -316,6 +384,7 @@ def main():
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--export", action="store_true")
     ap.add_argument("--no-replay-save", action="store_true")
+    ap.add_argument("--brain", choices=["v1", "v2"], default=None)
     args = ap.parse_args()
     run = os.path.abspath(args.run)
     os.makedirs(run, exist_ok=True)
@@ -329,14 +398,19 @@ def main():
         cfg["actors"] = args.actors
     if args.lr:
         cfg["lr"] = args.lr
+    if args.brain:
+        cfg["brain"] = args.brain
+    cfg.setdefault("brain", "v2")
+    cfg["dim"] = 64 if cfg["brain"] == "v1" else 100
     json.dump(cfg, open(cfg_path, "w"), indent=1)
+    arch = ARCH_V1 if cfg["brain"] == "v1" else ARCH
     torch.set_num_threads(3)
     torch.manual_seed(int(time.time()))
 
-    model = build_torch()
-    target = build_torch()
+    model = build_torch(arch)
+    target = build_torch(arch)
     opt = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
-    state = {"steps": 0, "added": 0, "seconds": 0.0, "best": -1e9, "chunks": 0, "rounds": 0}
+    state = {"steps": 0, "added": 0, "seconds": 0.0, "best": -1e9, "chunks": 0, "rounds": 0, "bench_sig": BENCH_SIG}
     ck = os.path.join(run, "ckpt.pt")
     if os.path.exists(ck):
         c = torch.load(ck, weights_only=False)
@@ -346,17 +420,26 @@ def main():
         for g in opt.param_groups:
             g["lr"] = cfg["lr"]
         state.update(c["state"])
+        if state.get("bench_sig") != BENCH_SIG:
+            state["best"] = -1e9   # benchmark set changed: scores are not comparable
+            state["bench_sig"] = BENCH_SIG
         print(f"[resume] steps {state['steps']} added {state['added']} trained {state['seconds'] / 60:.1f} min", flush=True)
     else:
+        if cfg["brain"] == "v1":
+            # fine-tune the shipped classic brain instead of starting from scratch
+            d = json.load(open(os.path.join(HERE, "..", "..", "src", "main", "resources", "assets", "pvpbot", "model", "policy.json")))["q"]
+            numpy_to_torch(model, [np.asarray(l["w"], np.float32) for l in d["layers"]],
+                           [np.asarray(l["b"], np.float32) for l in d["layers"]])
+            print("[init] v1 from bundled policy.json", flush=True)
         target.load_state_dict(model.state_dict())
-    rb = Replay(cfg["replay"], seed=int(time.time()))
+    rb = Replay(cfg["replay"], seed=int(time.time()), dim=cfg["dim"])
     rp = os.path.join(run, "replay.npz")
     if os.path.exists(rp):
         t0 = time.time()
         rb.load(rp)
         print(f"[resume] replay {rb.size} in {time.time() - t0:.0f}s", flush=True)
 
-    shared_model = build_torch()
+    shared_model = build_torch(arch)
     shared_model.load_state_dict(model.state_dict())
     shared_model.share_memory()
     shared = list(shared_model.parameters())
@@ -414,6 +497,8 @@ def main():
                     if score > state["best"]:
                         state["best"] = score
                         save_pbm(os.path.join(run, "best.pbm"), ews, ebs, "pvpbot-v2.3-best", state["steps"])
+                        if cfg["brain"] == "v1":
+                            export_v1_json(os.path.join(run, "best_v1.json"), ews, ebs, state)
                         print(f"[eval] NEW BEST score {score:.3f}", flush=True)
                 if drained > 200:
                     break
@@ -467,6 +552,8 @@ def main():
         os.replace(ck + ".tmp", ck)
         ws, bs = torch_to_numpy(model)
         save_pbm(os.path.join(run, "latest.pbm"), ws, bs, "pvpbot-v2.3-latest", state["steps"])
+        if cfg["brain"] == "v1":
+            export_v1_json(os.path.join(run, "policy_v1.json"), ws, bs, state)
         if not args.no_replay_save:
             t0 = time.time()
             rb.save(rp + ".tmp.npz")

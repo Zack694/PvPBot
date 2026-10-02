@@ -131,7 +131,43 @@ public final class PvpBot {
         /** Policy brain: saved model → bundled pre-trained → fresh. Never throws.
          *  A saved model with a mismatched architecture (older mod version) is
          *  rejected so the new, bigger brain always loads. */
+        /** v2.3: bump when the bundled v1 brain must replace on-device v1 brains. */
+        private static final int V1_BRAIN_EPOCH = 3;
+
+        /**
+         * v2.3 ONE-TIME v1 UPGRADE. Until v2.3.1 a bot click never counted as a
+         * hit (doAttack's return value was misread), so every on-device v1 brain
+         * learned without ever receiving a damage-dealt reward. On the first
+         * launch of this version the old brain is ARCHIVED to
+         * models/v1-before-v2.3.json (loadable from the Models tab) and the
+         * freshly simulator-trained bundled brain takes over.
+         */
+        private void upgradeV1BrainOnce() {
+                try {
+                        Path dir = BotConfig.dir().resolve("model");
+                        Path marker = dir.resolve("v1_brain_epoch.txt");
+                        int epoch = 0;
+                        if (Files.exists(marker)) {
+                                epoch = Integer.parseInt(Files.readString(marker).trim());
+                        }
+                        if (epoch >= V1_BRAIN_EPOCH) return;
+                        Path saved = dir.resolve("policy.json");
+                        if (Files.exists(saved)) {
+                                Path models = BotConfig.dir().resolve("models");
+                                Files.createDirectories(models);
+                                Files.copy(saved, models.resolve("v1-before-v2.3.json"), StandardCopyOption.REPLACE_EXISTING);
+                                Files.delete(saved);
+                                LOGGER.info("[pvpbot] v1 brain archived to models/v1-before-v2.3.json — bundled v2.3 v1 brain loaded");
+                        }
+                        Files.createDirectories(dir);
+                        Files.writeString(marker, Integer.toString(V1_BRAIN_EPOCH));
+                } catch (Exception e) {
+                        LOGGER.warn("[pvpbot] v1 brain upgrade skipped: {}", e.toString());
+                }
+        }
+
         private Dqn buildPolicy() {
+                upgradeV1BrainOnce();
                 int expertCap = Math.max(1024, config.expertBufferCapacity);
                 JsonObject saved = loadOrDefault("policy.json");
                 if (saved != null) {

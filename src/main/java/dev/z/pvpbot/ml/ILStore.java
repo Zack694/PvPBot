@@ -145,9 +145,14 @@ public final class ILStore {
                                         prev = null;
                                         continue;
                                 }
-                                float[] s = readVec(o.get("s"), PolicyNet.IN_DIM);
+                                // v2.3: the v2 part must be an ObsV4 vector (100 dims,
+                                // "obs":4). Old extractor sessions carry the retired
+                                // 104-dim layout — their v2 part is skipped, but their
+                                // v1 part (64 dims, unchanged) still loads.
+                                boolean v4 = o.has("obs") && o.get("obs").getAsInt() == dev.z.pvpbot.ml.obs.ObsV4.VERSION;
+                                float[] s = v4 ? readVec(o.get("s"), PolicyNet.IN_DIM) : null;
                                 float[] s1 = readVec(o.get("s1"), 64);
-                                if (s == null || s1 == null) {
+                                if (s == null && s1 == null) {
                                         bad++;
                                         prev = null;
                                         continue;
@@ -167,28 +172,26 @@ public final class ILStore {
                                         continue;
                                 }
                                 // next state: explicit "s2", else the next line's "s"
-                                float[] sNext = readVec(o.get("s2"), PolicyNet.IN_DIM);
-                                if (sNext == null && prev != null) {
-                                        sNext = readVec(prev.get("s"), PolicyNet.IN_DIM);
+                                // ---- v2 four-head expert ring (ObsV4, 100-dim) ----
+                                if (s != null) {
+                                        float[] sNext = readVec(o.get("s2"), PolicyNet.IN_DIM);
+                                        if (sNext == null && prev != null && prev.has("obs")
+                                                        && prev.get("obs").getAsInt() == dev.z.pvpbot.ml.obs.ObsV4.VERSION) {
+                                                sNext = readVec(prev.get("s"), PolicyNet.IN_DIM);
+                                        }
+                                        if (sNext != null || done) {
+                                                bot.policy().rememberExpert(s, mv, sp, jp, sn,
+                                                                clampN(ay), clampN(ap), ck, r,
+                                                                sNext != null ? sNext : s, done);
+                                        }
                                 }
-                                // TD transitions need a next state; terminal ones do not
-                                if (sNext == null && !done) {
-                                        // keep as open chain: remember with itself is wrong —
-                                        // skip until a successor exists
-                                        prev = o;
-                                        continue;
-                                }
-                                // ---- v2 four-head expert ring (104-dim) ----
-                                bot.policy().rememberExpert(s, mv, sp, jp, sn,
-                                                clampN(ay), clampN(ap), ck, r,
-                                                sNext != null ? sNext : s, done);
                                 // ---- v1 DQN expert ring (64-dim) ----
                                 float[] s1Next = sliceOrNull(o.get("s1n"), 64);
                                 if (s1Next == null && prev != null) {
-                                        s1Next = sliceVec(prev.get("s1"));
+                                        s1Next = sliceOrNull(prev.get("s1"), 64);
                                 }
                                 int v1Action = ActionSpace.encode(mv, sp, jp, ck >= 0.5f);
-                                if (s1Next != null || done) {
+                                if (s1 != null && (s1Next != null || done)) {
                                         bot.dqn().rememberExpert(s1, v1Action, r,
                                                         s1Next != null ? s1Next : s1, done);
                                 }

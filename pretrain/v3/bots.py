@@ -133,6 +133,20 @@ def on_target(me, view, world):
     return not world.segment_blocked(me.x, me.z, view.x, view.z, 8)
 
 
+def side_from_aim(me, view, t):
+    ty = math.radians(view.yaw)
+    lx, lz = -math.sin(ty), math.cos(ty)
+    dx, dz = me.x - view.x, me.z - view.z
+    along = dx * lx + dz * lz
+    px, pz = dx - along * lx, dz - along * lz
+    yr = math.radians(me.yaw)
+    rx, rz = -math.cos(yr), -math.sin(yr)
+    side = px * rx + pz * rz
+    if abs(side) < 1e-3:
+        return 1 if (t // 20) % 2 == 0 else -1
+    return 1 if side > 0 else -1
+
+
 def dist3(a, b):
     return math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2)
 
@@ -305,6 +319,15 @@ class LearnerCtl:
             self.close_streak = 0
         self.pending += gov_pen
 
+        # v2.3.2 pure combo breaker (decision-time governor, mirrors BotController.governPureMove)
+        if getattr(cfg, "combo_breaker", False) and self.combo_taken >= 2 and dh < 4.0:
+            if getattr(self, "cb_left", 0) <= 0:
+                self.cb_left = 8 + int(self.rng.integers(0, 5))
+                self.cb_dir = side_from_aim(me, view, t)
+            self.cb_left -= 1
+            move = 6 if self.cb_dir > 0 else 5
+        else:
+            self.cb_left = 0
         sneak = cfg.sneak_allowed and head["sneak"] and head["sneak_margin"] >= 0.25
         sprint = head["sprint"] or (move not in BACK_MOVES and not sneak)
         jump = head["jump"]
@@ -426,6 +449,17 @@ class ScriptedCtl:
                           styles=[0.75, 0.1, 0.05, 0.0, 0.1])
         elif preset == "crit":
             self.p.update(crit=u(0.7, 1.0), styles=[0.6, 0.2, 0.1, 0.0, 0.1])
+        elif preset == "critpro":
+            # chains timed crits: jump at ~45% charge so the descent hit is fully charged
+            self.skill = u(0.8, 1.0)
+            self.p.update(react=int(rng.integers(1, 3)), crit=1.0, critpro=True, thr_lo=u(0.88, 0.95), thr_w=0.04,
+                          jreset=u(0.3, 0.8), spam=False, styles=[0.7, 0.2, 0.05, 0.0, 0.05])
+        elif preset == "combo":
+            # keeps you in a combo: rush, short w-taps after every hit, jump resets
+            self.skill = u(0.85, 1.0)
+            self.p.update(react=int(rng.integers(1, 3)), thr_lo=u(0.86, 0.94), thr_w=0.05, spam=False,
+                          wtap=u(0.7, 0.95), wtap_len=(1, 2), stap=u(0.0, 0.1), jreset=u(0.6, 0.95),
+                          crit=u(0.0, 0.15), styles=[0.85, 0.1, 0.0, 0.0, 0.05])
         elif preset == "kiter":
             self.p.update(styles=[0.05, 0.2, 0.1, 0.55, 0.1], stap=u(0.3, 0.8))
         elif preset == "jitter":
@@ -504,10 +538,15 @@ class ScriptedCtl:
         if self.jump_at >= 0 and t >= self.jump_at:
             jump = me.on_ground
             self.jump_at = -1
-        crit_try = p["crit"] > 0 and dh < 3.6 and me.charge() > 0.6 and me.on_ground and rng.random() < p["crit"] * 0.25
+        if p.get("critpro"):
+            closing = (view_vel[0] * (me.x - view.x) + view_vel[1] * (me.z - view.z)) / max(1e-4, dh)
+            crit_try = me.on_ground and 2.3 < dh < 4.0 and me.charge() >= 0.42 and t >= self.jump_at + 6
+        else:
+            crit_try = p["crit"] > 0 and dh < 3.6 and me.charge() > 0.6 and me.on_ground and rng.random() < p["crit"] * 0.25
         if crit_try:
             jump = True
             self.crit_mode = True
+            me.sprinting = False   # crits need no sprint: real crit spammers drop it first
         if me.on_ground and not jump:
             self.crit_mode = False
         sneak = t < self.sneak_until

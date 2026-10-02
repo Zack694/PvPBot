@@ -199,9 +199,13 @@ public final class OpponentMemory {
         private int wtapWatch = -1;
 
         /** Called when WE hit THEM — begins the post-hit reaction probe. */
+        private boolean probeJumpCounted, probeRetreatCounted;
+
         public void onMyHitThem(double dist) {
                 myHits += 1f;
                 postHitWatchTicks = 10;
+                probeJumpCounted = false;
+                probeRetreatCounted = false;
                 distAtPostHitStart = (float) dist;
                 postHitJumpTrials += 1f;
                 postHitRetreatTrials += 1f;
@@ -210,8 +214,17 @@ public final class OpponentMemory {
         /** Continuation of post-hit probe: returns true if probe finished this tick. */
         public void probePostHit(boolean theyJumpedThisTick, double distNow) {
                 if (postHitWatchTicks > 0) {
-                        if (theyJumpedThisTick) postHitJumpHits += 1f;
-                        if (distNow > distAtPostHitStart + 0.9) postHitRetreatHits += 1f;
+                        // v2.3: each probe counts AT MOST once per outcome (the retreat
+                        // test used to add +1 every tick of the 10-tick watch, so the
+                        // "retreat rate" feature read up to ~10 instead of 0..1)
+                        if (theyJumpedThisTick && !probeJumpCounted) {
+                                postHitJumpHits += 1f;
+                                probeJumpCounted = true;
+                        }
+                        if (distNow > distAtPostHitStart + 0.9 && !probeRetreatCounted) {
+                                postHitRetreatHits += 1f;
+                                probeRetreatCounted = true;
+                        }
                         if (--postHitWatchTicks == 0) {
                                 postHitJumpTrials = Math.max(1, Math.min(postHitJumpTrials, 120));
                                 postHitRetreatTrials = Math.max(1, Math.min(postHitRetreatTrials, 120));
@@ -255,8 +268,8 @@ public final class OpponentMemory {
                 f[3] = Math.min(1f, critEvents / denom);
                 f[4] = Math.min(1f, aggression);
                 f[5] = Math.min(2f, avgDist / 3f) / 2f;
-                f[6] = postHitJumpTrials >= 3 ? postHitJumpHits / postHitJumpTrials : 0.5f;
-                f[7] = postHitRetreatTrials >= 3 ? postHitRetreatHits / postHitRetreatTrials : 0.5f;
+                f[6] = postHitJumpTrials >= 3 ? Math.min(1f, postHitJumpHits / postHitJumpTrials) : 0.5f;
+                f[7] = postHitRetreatTrials >= 3 ? Math.min(1f, postHitRetreatHits / postHitRetreatTrials) : 0.5f;
                 // v1.0.9 advanced movement knowledge (callers indexing 0..7 unaffected)
                 float total = Math.max(0.01f, speedAccum);
                 f[8] = Math.min(1f, lateralAccum / total);            // strafeRatio

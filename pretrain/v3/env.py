@@ -18,6 +18,7 @@ import numpy as np
 from physics import Body, World, Kit, DIAMOND, NETHERITE, physics_tick, attack, regen_tick, wrap
 from bots import LearnerCtl, LearnerCfg, ScriptedCtl, on_target, MOVE_VEC, dist3
 from obs import ObsV4, Frame, Fighter, f32
+from v1 import V1Ctl
 
 ROUND_TICKS = 1600
 
@@ -62,12 +63,13 @@ def to_fighter(v, as_float32=True):
 
 
 class Side:
-    def __init__(self, body, ctl, learning, lag):
+    def __init__(self, body, ctl, learning, lag, kind="v2"):
         self.body = body
         self.ctl = ctl
-        self.learning = learning          # four-head policy drives this side
+        self.learning = learning          # a neural brain drives this side
+        self.kind = kind                  # "v2" four-head pure mode | "v1" classic stack
         self.lag = lag
-        self.obs = ObsV4() if learning else None
+        self.obs = ObsV4() if (learning and kind == "v2") else None
         self.hist = deque(maxlen=8)
         self.swung = False
         self.prev_seen_hp = None
@@ -84,7 +86,7 @@ class Side:
 
 
 class Match:
-    def __init__(self, rng, opponent="scripted", preset=None, learner_cfg=None, rounds=None):
+    def __init__(self, rng, opponent="scripted", preset=None, learner_cfg=None, rounds=None, brain="v2"):
         self.rng = rng
         u = rng.uniform
         r = u(8.0, 22.0)
@@ -107,9 +109,16 @@ class Match:
         self.lcfg = learner_cfg or LearnerCfg()
         self.rounds_left = rounds if rounds else int(rng.integers(1, 4))
         lag_a, lag_b = int(rng.integers(0, 4)), int(rng.integers(0, 4))
-        self.a = Side(None, LearnerCtl(rng, self.lcfg), True, lag_a)
+        self.brain = brain
+        if brain == "v1":
+            self.a = Side(None, V1Ctl(rng), True, lag_a, "v1")
+        else:
+            self.a = Side(None, LearnerCtl(rng, self.lcfg), True, lag_a)
         if opponent == "policy":
-            self.b = Side(None, LearnerCtl(rng, self.lcfg), True, lag_b)
+            if brain == "v1":
+                self.b = Side(None, V1Ctl(rng), True, lag_b, "v1")
+            else:
+                self.b = Side(None, LearnerCtl(rng, self.lcfg), True, lag_b)
         else:
             self.b = Side(None, ScriptedCtl(rng, preset), False, lag_b)
         self.result = None
@@ -146,6 +155,10 @@ class Match:
             s.prev_hp = 20.0
             s.events = (False, 0.0, False, 0.0)
             s.stats = {"dealt": 0.0, "taken": 0.0, "hits": 0, "swings": 0, "crits": 0, "jumps": 0}
+            if s.kind == "v1" and s.learning:
+                s.ctl.episode_start = self.t
+                if self.t == 0:
+                    s.ctl.mem.reset()
             if s.obs is not None:
                 if self.t == 0:
                     s.obs.reset_opponent()
@@ -196,6 +209,24 @@ class Match:
                     s.ctl.on_hurt(self.t)
                 continue
             ctl = s.ctl
+            if s.kind == "v1":
+                vview = (view.x - pview.x, view.z - pview.z)
+                ctl._vy_seen = view.y - pview.y
+                my_before = ctl.last_my_hit_tick
+                taken_before = ctl.last_taken_tick
+                ctl.hitwatch_v1(self.t, dealt, took, view, vview, me)
+                probes = self.world.probes(me)
+                if ctl.last_taken_tick == self.t and taken_before != self.t:
+                    ctl.on_hurt(self.t, probes)
+                if ctl.last_my_hit_tick == self.t and my_before != self.t:
+                    ctl.on_my_hit(self.t, dist3(me, view))
+                ctl.movement_shaping_v1(me, view, probes)
+                s.cur_obs = ctl.perceive(self.t, me, view, vview, ctl._vy_seen, probes)
+                s.probes = probes
+                s.vview = vview
+                ctl.memory_tick(self.t, me, view, vview)
+                out[name] = s.cur_obs
+                continue
             my_hit_before = ctl.last_my_hit_tick
             ctl.hitwatch(self.t, dealt, took)
             i_hit = ctl.last_my_hit_tick == self.t and my_hit_before != self.t
@@ -242,7 +273,17 @@ class Match:
             pv = self.seen_prev(s, o)
             vel = (view.x - pv.x, view.z - pv.z)
             me = s.body
-            if s.learning:
+            if s.learning and s.kind == "v1":
+                ctl = s.ctl
+                if s.last_obs is not None:
+                    trans.append((name, s.last_obs, s.last_act, None, ctl.pending, s.cur_obs, False, False))
+                ctl.pending = 0.0
+                ex, keys, aim, swing = ctl.decide_v1(t, int(heads[name]), me, view, s.vview, s.probes, self.world)
+                s.last_obs = s.cur_obs
+                s.last_act = ex
+                s.last_labels = None
+                intents[name] = (keys, aim, swing)
+            elif s.learning:
                 ctl = s.ctl
                 # close previous transition with the reward accrued since
                 if s.last_obs is not None:

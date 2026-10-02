@@ -1334,6 +1334,7 @@ public final class BotController {
                 // no tactics veto, no sprint forcing, no wtap suppression. Physics
                 // sanity only (vanilla handles backward-sprint).
                 tactics.noteTerrain(terrain);
+                if (!cfg.pureMode) tactics.noteTarget(target, distH, hits.comboTaken); // v2.3 counters
                 int move = cfg.pureMode ? ActionSpace.moveOf(action)
                                 : tactics.movePolicy(ActionSpace.moveOf(action), self, target, tickCounter, distH, hits.comboDealt, activeTrade);
                 // v2.3: the pure retreat governor + aggression floor moved to
@@ -2002,9 +2003,9 @@ public final class BotController {
                 }
                 appendCsv(result);
                 lastAnnouncement = String.format(
-                                "EP %d: %s — dealt %.1f / taken %.1f (hits %d, whiffs %d, crits %d, wtaps %d, jresets %d, sneaks %d, escapes %d)",
+                                "EP %d: %s — dealt %.1f / taken %.1f (hits %d, whiffs %d, crits %d, wtaps %d, jresets %d, sneaks %d, escapes %d, crit-denials %d)",
                                 episodesDone, result, hits.dmgDealt, hits.dmgTaken, hits.hitsLanded, hits.whiffs, hits.critsLanded,
-                                tactics.wtapCount, tactics.jumpResetCount, tactics.sneakHitCount, tactics.escapeCount);
+                                tactics.wtapCount, tactics.jumpResetCount, tactics.sneakHitCount, tactics.escapeCount, tactics.critDenialCount);
                 announce(lastAnnouncement);
                 lastState = null;
                 lastAction = -1;

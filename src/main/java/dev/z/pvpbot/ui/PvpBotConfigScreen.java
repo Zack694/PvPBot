@@ -369,7 +369,7 @@ public final class PvpBotConfigScreen extends Screen {
                 toggle("TriggerBot", tipOf(BotTooltips.TRIGGERBOT), c -> c.triggerBot, (c, v) -> c.triggerBot = v);
                 slider("Attack band min", "", 0.5f, 1.0f, 2, tipOf(BotTooltips.BAND_MIN), c -> c.attackCooldownMin, (c, v) -> c.attackCooldownMin = v);
                 slider("Attack band max", "", 0.5f, 1.0f, 2, tipOf(BotTooltips.BAND_MAX), c -> c.attackCooldownMax, (c, v) -> c.attackCooldownMax = v);
-                slider("Click range", "blocks", 2.5f, 3.4f, 2, tipOf(BotTooltips.CLICK_MAX_DIST), c -> c.clickMaxDist, (c, v) -> c.clickMaxDist = v);
+                slider("Click range", "blocks", 2.5f, 3.2f, 2, tipOf(BotTooltips.CLICK_MAX_DIST), c -> c.clickMaxDist, (c, v) -> c.clickMaxDist = v);
                 toggle("Sprint hits only", tipOf(BotTooltips.SPRINT_HIT_ONLY), c -> c.sprintHitOnly, (c, v) -> c.sprintHitOnly = v);
                 toggle("W-Tap (S-tap)", tipOf(BotTooltips.WTAP_ENABLED), c -> c.wtapEnabled, (c, v) -> c.wtapEnabled = v);
                 slider("W-Tap chance", "", 0f, 1f, 2, tipOf(BotTooltips.WTAP_CHANCE), c -> c.wtapChance, (c, v) -> c.wtapChance = v);
@@ -382,6 +382,10 @@ public final class PvpBotConfigScreen extends Screen {
                 slider("Sneak + jump chance", "", 0f, 1f, 2, tipOf(BotTooltips.SNEAK_JUMP_HIT), c -> c.sneakJumpHitChance, (c, v) -> c.sneakJumpHitChance = v);
                 slider("Crit chance", "", 0f, 1f, 2, tipOf(BotTooltips.CRIT_CHANCE), c -> c.critAttemptChance, (c, v) -> c.critAttemptChance = v);
                 slider("Mid-air hit chance", "", 0f, 1f, 2, tipOf(BotTooltips.MIDAIR_CHANCE), c -> c.midAirChance, (c, v) -> c.midAirChance = v);
+                toggle("Combo breaker", "Classic brain: after taking 2+ hits in a row, sprint-strafe toward the side the opponent's aim is weakest instead of running straight back (that keeps you in their combo). The jump reset still fires.",
+                                c -> c.comboBreaker, (c, v) -> c.comboBreaker = v);
+                toggle("Crit denial", "Classic brain: when the opponent jumps in crit range, hold the edge of reach (~3 blocks) until they land and never jump to trade crits. Their falling crit comes up short or drifts into your grounded sprint hit.",
+                                c -> c.critDenial, (c, v) -> c.critDenial = v);
                 toggle("Backoff spacing", tipOf(BotTooltips.BACKOFF_ENABLED), c -> c.backoffEnabled, (c, v) -> c.backoffEnabled = v);
                 slider("Backoff below", "blocks", 0f, 3f, 2, tipOf(BotTooltips.BACKOFF_BELOW), c -> c.tooCloseDist, (c, v) -> c.tooCloseDist = v);
                 slider("Backoff release", "blocks", 0f, 3f, 2, tipOf(BotTooltips.BACKOFF_RELEASE), c -> c.backoffReleaseDist, (c, v) -> c.backoffReleaseDist = v);
