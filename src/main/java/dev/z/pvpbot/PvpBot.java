@@ -55,7 +55,8 @@ public final class PvpBot {
 
         /** v1.0.4 brain: 64-dim perception -> 480x480 hidden -> 72 actions.
          *  296,712 parameters ≈ 1.13 MB of float32 weights (the "1 MB brain"). */
-        public static final int[] POLICY_ARCH = {dev.z.pvpbot.bot.Perception.DIM, 480, 480, 72};
+        /** v2.3.6: the classic brain reads the same parity-tested ObsV4 (100 dims) as pure mode. */
+        public static final int[] POLICY_ARCH = {dev.z.pvpbot.ml.obs.ObsV4.DIM, 480, 480, 72};
 
         /** v2.3: offline-pretrained four-head brain shipped inside the jar. */
         public static final String BUNDLED_V2 = "/assets/pvpbot/model/brain_v2.pbm";
@@ -132,7 +133,7 @@ public final class PvpBot {
          *  A saved model with a mismatched architecture (older mod version) is
          *  rejected so the new, bigger brain always loads. */
         /** v2.3: bump when the bundled v1 brain must replace on-device v1 brains. */
-        private static final int V1_BRAIN_EPOCH = 4;
+        private static final int V1_BRAIN_EPOCH = 5;
 
         /**
          * v2.3 ONE-TIME v1 UPGRADE. Until v2.3.1 a bot click never counted as a

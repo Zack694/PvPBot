@@ -151,7 +151,9 @@ public final class ILStore {
                                 // v1 part (64 dims, unchanged) still loads.
                                 boolean v4 = o.has("obs") && o.get("obs").getAsInt() == dev.z.pvpbot.ml.obs.ObsV4.VERSION;
                                 float[] s = v4 ? readVec(o.get("s"), PolicyNet.IN_DIM) : null;
-                                float[] s1 = readVec(o.get("s1"), 64);
+                                // v2.3.6: the classic brain reads ObsV4 too — old 64-dim
+                                // "s1" demos no longer fit; ObsV4 sessions feed both brains
+                                float[] s1 = s;
                                 if (s == null && s1 == null) {
                                         bad++;
                                         prev = null;
@@ -186,9 +188,10 @@ public final class ILStore {
                                         }
                                 }
                                 // ---- v1 DQN expert ring (64-dim) ----
-                                float[] s1Next = sliceOrNull(o.get("s1n"), 64);
-                                if (s1Next == null && prev != null) {
-                                        s1Next = sliceOrNull(prev.get("s1"), 64);
+                                float[] s1Next = readVec(o.get("s2"), PolicyNet.IN_DIM);
+                                if (s1Next == null && prev != null && prev.has("obs")
+                                                && prev.get("obs").getAsInt() == dev.z.pvpbot.ml.obs.ObsV4.VERSION) {
+                                        s1Next = readVec(prev.get("s"), PolicyNet.IN_DIM);
                                 }
                                 int v1Action = ActionSpace.encode(mv, sp, jp, ck >= 0.5f);
                                 if (s1 != null && (s1Next != null || done)) {

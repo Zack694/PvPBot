@@ -72,7 +72,9 @@ class V1Cfg:
     imm_thr = 0.87         # stored charge 0.87 -> progress(0.5) > 0.9 = full-power hit
     imm_sprint_wait = 0    # immediate: wait up to N ticks for sprint, only while W is held
     free_move = True       # v2.3.5 Java default: the DQN owns movement
-    aim_predict = True     # v2.3.6 strafe-reversal + ping aware aim lead (no backoff/over-retreat/combo strafe/freeze floor)
+    aim_predict = True     # v2.3.6 strafe-reversal + ping aware aim lead
+    free_idle_floor = False  # free movement keeps the anti-freeze floor
+    jreset_on = True
 
 
 BACKOFF_ARC = (7, 8, 2, 8, 7, 8, 6, 7)
@@ -499,6 +501,12 @@ class V1Ctl(LearnerCtl):
         if self.chase:
             return self._intercept(me, view, probes)
         if free:
+            if c.free_idle_floor and dh <= 3.2 and me.on_ground and a_move == 0:
+                self.idle_in_reach += 1
+                if self.idle_in_reach >= 4:
+                    return 1 if self.combo_dealt < 1 else (6 if (t // 8) % 2 else 5)
+            else:
+                self.idle_in_reach = 0
             return a_move
         if a_move in BACK_MOVES and dh < 4.5:
             self.retreat_pressure += 1.0
@@ -573,7 +581,7 @@ class V1Ctl(LearnerCtl):
         d3 = dist3(me, view)
         jump = False
         retreating = self.backoff or mv in BACK_MOVES
-        if self.jr_at > 0 and t >= self.jr_at:
+        if self.jr_at > 0 and t >= self.jr_at and c.jreset_on:
             if t - self.jr_at > 12:
                 self.jr_at = -1
             elif me.on_ground and d3 <= 3.5 and t - self.last_jr >= 4:

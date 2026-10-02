@@ -34,7 +34,7 @@ import torch.multiprocessing as mp  # noqa: E402
 
 from net import ARCH, MOVES, SPRINT_OFF, JUMP_OFF, SNEAK_OFF, AIM_OFF, CLICK_OFF  # noqa: E402
 
-ARCH_V1 = [64, 480, 480, 72]
+ARCH_V1 = [100, 480, 480, 72]   # v2.3.6: classic reads ObsV4
 from net import build_torch, torch_to_numpy, numpy_to_torch, np_forward, decide, save_pbm, load_pbm  # noqa: E402
 from replay import Replay  # noqa: E402
 
@@ -310,8 +310,8 @@ def mirror_batch_v1(b, frac=0.5):
     out = {key: v.copy() for key, v in b.items()}
     for key in ("s", "s2"):
         x = out[key]
-        x[np.ix_(k, V1_NEG)] *= -1.0
-        for i, j in V1_SWAP:
+        x[np.ix_(k, MIRROR_NEG)] *= -1.0      # v2.3.6: ObsV4 layout
+        for i, j in MIRROR_SWAP:
             xi = x[k, i].copy()
             x[k, i] = x[k, j]
             x[k, j] = xi
@@ -446,26 +446,22 @@ def main():
     args = ap.parse_args()
     run = os.path.abspath(args.run)
     os.makedirs(run, exist_ok=True)
-    # v2.3.6 single-run lock: a second trainer on the same run dir exits at once
-    # (overlapping runs overwrote each other's checkpoints and replay)
+    # v2.3.6 single-run lock with a HEARTBEAT (pids are reused across sandbox
+    # shells, so "is that pid alive" is not a valid test). A lock whose
+    # heartbeat is older than 150 s is stale.
     lock = os.path.join(run, "train.lock")
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
-    except FileExistsError:
-        try:
-            other = int(open(lock).read().strip() or "0")
-            os.kill(other, 0)
-            print(f"[lock] run already in progress (pid {other}) — exiting", flush=True)
-            return
-        except (ProcessLookupError, ValueError):
-            os.remove(lock)
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
+    token = f"{os.getpid()}-{time.time():.6f}"
+    if os.path.exists(lock) and time.time() - os.path.getmtime(lock) < 150:
+        print("[lock] another trainer is using this run — exiting", flush=True)
+        return
+    with open(lock, "w") as fh:
+        fh.write(token)
+    time.sleep(0.5)
+    if open(lock).read() != token:
+        print("[lock] lost the race for this run — exiting", flush=True)
+        return
     import atexit
-    atexit.register(lambda: os.path.exists(lock) and int(open(lock).read() or 0) == os.getpid() and os.remove(lock))
+    atexit.register(lambda: os.path.exists(lock) and open(lock).read() == token and os.remove(lock))
     league_dir = os.path.join(run, "league")
     os.makedirs(league_dir, exist_ok=True)
     cfg = default_cfg()
@@ -479,7 +475,7 @@ def main():
     if args.brain:
         cfg["brain"] = args.brain
     cfg.setdefault("brain", "v2")
-    cfg["dim"] = 64 if cfg["brain"] == "v1" else 100
+    cfg["dim"] = 100
     json.dump(cfg, open(cfg_path, "w"), indent=1)
     arch = ARCH_V1 if cfg["brain"] == "v1" else ARCH
     torch.set_num_threads(3)
@@ -503,7 +499,7 @@ def main():
             state["bench_sig"] = BENCH_SIG
         print(f"[resume] steps {state['steps']} added {state['added']} trained {state['seconds'] / 60:.1f} min", flush=True)
     else:
-        if cfg["brain"] == "v1":
+        if cfg["brain"] == "v1" and cfg.get("init_bundled", False):
             # fine-tune the shipped classic brain instead of starting from scratch
             d = json.load(open(os.path.join(HERE, "..", "..", "src", "main", "resources", "assets", "pvpbot", "model", "policy.json")))["q"]
             numpy_to_torch(model, [np.asarray(l["w"], np.float32) for l in d["layers"]],
@@ -545,6 +541,7 @@ def main():
     loss_ema = aim_ema = click_ema = td_ema = None
     roll = []
     last_ckpt = time.time()
+    last_hb = time.time()
     last_replay_save = time.time()
 
     def checkpoint(save_replay):
@@ -564,6 +561,9 @@ def main():
 
     try:
         while time.time() - t_start < budget:
+            if time.time() - last_hb > 20:
+                last_hb = time.time()
+                os.utime(lock, None)
             if time.time() - last_ckpt > 60:
                 last_ckpt = time.time()
                 do_replay = time.time() - last_replay_save > 230

@@ -17,9 +17,9 @@ public class BundledV1BrainTest {
                 var in = BundledV1BrainTest.class.getResourceAsStream("/assets/pvpbot/model/policy.json");
                 assertNotNull(in, "bundled v1 brain missing");
                 JsonObject root = JsonParser.parseReader(new InputStreamReader(in, StandardCharsets.UTF_8)).getAsJsonObject();
-                Dqn d = Dqn.fromJson(root, 4096, 0.995f, 1L, 1024, new int[]{64, 480, 480, 72});
-                float[] s = new float[64];
-                s[55] = 1f;
+                Dqn d = Dqn.fromJson(root, 4096, 0.995f, 1L, 1024, new int[]{100, 480, 480, 72});
+                float[] s = new float[100];
+                s[99] = 1f;
                 float[] q = d.qValues(s);
                 for (float v : q) {
                         if (!Float.isFinite(v)) throw new AssertionError("non-finite Q");

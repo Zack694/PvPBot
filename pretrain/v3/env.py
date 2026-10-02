@@ -69,7 +69,7 @@ class Side:
         self.learning = learning          # a neural brain drives this side
         self.kind = kind                  # "v2" four-head pure mode | "v1" classic stack
         self.lag = lag
-        self.obs = ObsV4() if (learning and kind == "v2") else None
+        self.obs = ObsV4() if learning else None   # v2.3.6: classic reads ObsV4 too
         self.hist = deque(maxlen=8)
         self.swung = False
         self.prev_seen_hp = None
@@ -226,10 +226,16 @@ class Match:
                 if ctl.last_my_hit_tick == self.t and my_before != self.t:
                     ctl.on_my_hit(self.t, dist3(me, view))
                 ctl.movement_shaping_v1(me, view, probes)
-                s.cur_obs = ctl.perceive(self.t, me, view, vview, ctl._vy_seen, probes)
                 s.probes = probes
                 s.vview = vview
                 ctl.memory_tick(self.t, me, view, vview)
+                i_hit_v1 = ctl.last_my_hit_tick == self.t and my_before != self.t
+                f = self._frame(s, me, view, probes, dealt, took, i_hit_v1, ctl.cur_move, ctl.jump_hold > 0)
+                s.obs.tick(f)
+                s.frame = f
+                s.cur_obs = s.obs.build()
+                if s is self.a and self.recorder is not None:
+                    self.recorder.append({"op": "tick", "f": f.to_dict(), "obs": list(s.cur_obs)})
                 out[name] = s.cur_obs
                 continue
             my_hit_before = ctl.last_my_hit_tick
@@ -237,24 +243,7 @@ class Match:
             i_hit = ctl.last_my_hit_tick == self.t and my_hit_before != self.t
             probes = self.world.probes(me)
             ctl.movement_shaping(me, view, probes)
-            f = Frame()
-            f.me = to_fighter(snap(me))
-            f.them = to_fighter(view)
-            f.my_charge = f32(me.charge(0.0))
-            f.food = f32(me.food)
-            f.my_move = ctl.exec[0]
-            f.my_jump_held = ctl.jump_hold > 0
-            f.terrain = probes
-            f.drop_ahead = 0.0
-            f.ceiling_low = 0.0
-            f.los = not self.world.segment_blocked(me.x, me.z, view.x, view.z, 8)
-            f.crosshair_on_target = on_target(me, view, self.world)
-            f.i_swung = s.swung
-            f.i_hit_them = i_hit
-            f.dmg_dealt = f32(dealt if i_hit else 0.0)
-            f.i_crit = False
-            f.i_was_hit = took > 0.01
-            f.dmg_taken = f32(took if took > 0.01 else 0.0)
+            f = self._frame(s, me, view, probes, dealt, took, i_hit, ctl.exec[0], ctl.jump_hold > 0)
             s.obs.tick(f)
             s.frame = f
             s.cur_obs = s.obs.build()
@@ -262,6 +251,27 @@ class Match:
                 self.recorder.append({"op": "tick", "f": f.to_dict(), "obs": list(s.cur_obs)})
             out[name] = s.cur_obs
         return out
+
+    def _frame(self, s, me, view, probes, dealt, took, i_hit, my_move, jump_held):
+        f = Frame()
+        f.me = to_fighter(snap(me))
+        f.them = to_fighter(view)
+        f.my_charge = f32(me.charge(0.0))
+        f.food = f32(me.food)
+        f.my_move = int(my_move)
+        f.my_jump_held = bool(jump_held)
+        f.terrain = probes
+        f.drop_ahead = 0.0
+        f.ceiling_low = 0.0
+        f.los = not self.world.segment_blocked(me.x, me.z, view.x, view.z, 8)
+        f.crosshair_on_target = on_target(me, view, self.world)
+        f.i_swung = s.swung
+        f.i_hit_them = i_hit
+        f.dmg_dealt = f32(dealt if i_hit else 0.0)
+        f.i_crit = False
+        f.i_was_hit = took > 0.01
+        f.dmg_taken = f32(took if took > 0.01 else 0.0)
+        return f
 
     # ------------------------------------------------------------ phase 2
     def act(self, heads, mature_click=False):

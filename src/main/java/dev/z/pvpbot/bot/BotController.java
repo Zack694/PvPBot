@@ -1207,8 +1207,7 @@ public final class BotController {
          *  transition, and train. Nothing is ever actuated in this mode. */
         private void observeStep(ClientPlayerEntity self, LivingEntity target) {
                 if (!inEpisode) beginEpisode();
-                float matchTicks = tickCounter - episodeStartTick;
-                float[] state = perception.build(self, target, hits, memory, terrain, tickCounter, matchTicks, hits.whiffRate());
+                float[] state = obsV4.build(); // v2.3.6: classic demos in the ObsV4 layout
                 int userAction = decodeUserAction(self);
                 float stepReward = hits.pendingReward; // shared by both brains
                 if (lastState != null && lastAction >= 0) {
@@ -1294,8 +1293,8 @@ public final class BotController {
                 }
                 if (!inEpisode) beginEpisode();
 
-                float matchTicks = tickCounter - episodeStartTick;
-                float[] state = perception.build(self, target, hits, memory, terrain, tickCounter, matchTicks, hits.whiffRate());
+                // v2.3.6: the classic brain reads ObsV4 (fed once per tick in tick())
+                float[] state = obsV4.build();
 
                 // finish previous transition
                 if (lastState != null && lastAction >= 0) {
