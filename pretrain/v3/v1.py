@@ -65,6 +65,9 @@ class V1Cfg:
     hit_select_wait = 4
     pcrit = False          # wiki: crit off the vertical KB of their hit (no own jump)
     fifo = True            # v2.3.3 Java parity: no-drop reaction delay line
+    combo_strafe = True
+    backoff_on = True
+    wtap_on = True
 
 
 BACKOFF_ARC = (7, 8, 2, 8, 7, 8, 6, 7)
@@ -323,7 +326,7 @@ class V1Ctl(LearnerCtl):
     # ------------------------------------------------------------ tactics hooks
     def on_my_hit(self, t, d3):
         c = self.v1
-        if d3 > 3.4 or t - self.last_wtap < 1:
+        if not c.wtap_on or d3 > 3.4 or t - self.last_wtap < 1:
             return
         if self.rng.random() >= c.wtap_chance:
             return
@@ -460,7 +463,7 @@ class V1Ctl(LearnerCtl):
         if self.over_retreat > 0:
             self.over_retreat -= 1
         c = self.v1
-        if not self.backoff and dh < c.too_close and t - self.last_backoff_end >= 20:
+        if c.backoff_on and not self.backoff and dh < c.too_close and t - self.last_backoff_end >= 20:
             self.backoff = True
             self.backoff_start = t
         elif self.backoff and (dh >= c.backoff_release or t - self.backoff_start > max(6, c.backoff_max)):
@@ -495,7 +498,7 @@ class V1Ctl(LearnerCtl):
             self.retreat_pressure = 0.0
         if self.over_retreat > 0:
             return 1 if (t % 8) < 4 else 5
-        if (self.combo_dealt >= 1 or active_trade) and 1.35 < dh < 3.4 and a_move not in BACK_MOVES:
+        if c.combo_strafe and (self.combo_dealt >= 1 or active_trade) and 1.35 < dh < 3.4 and a_move not in BACK_MOVES:
             self.combo_left -= 1
             if self.combo_left <= 0 or self.combo_dir == 0:
                 self.combo_left = 9
