@@ -466,8 +466,33 @@ def main():
     last_log = time.time()
     loss_ema = aim_ema = click_ema = td_ema = None
     roll = []
+    last_ckpt = time.time()
+    last_replay_save = time.time()
+
+    def checkpoint(save_replay):
+        """Periodic save: an aborted chunk loses at most a few minutes (v2.3.2)."""
+        st = dict(state)
+        st["seconds"] = state["seconds"] + time.time() - t_start
+        torch.save({"model": model.state_dict(), "target": target.state_dict(), "opt": opt.state_dict(),
+                    "state": st}, ck + ".tmp")
+        os.replace(ck + ".tmp", ck)
+        cws, cbs = torch_to_numpy(model)
+        save_pbm(os.path.join(run, "latest.pbm"), cws, cbs, "pvpbot-v2.3-latest", state["steps"])
+        if cfg["brain"] == "v1":
+            export_v1_json(os.path.join(run, "policy_v1.json"), cws, cbs, st)
+        if save_replay and not args.no_replay_save:
+            rb.save(rp + ".tmp.npz")
+            os.replace(rp + ".tmp.npz", rp)
+
     try:
         while time.time() - t_start < budget:
+            if time.time() - last_ckpt > 60:
+                last_ckpt = time.time()
+                do_replay = time.time() - last_replay_save > 230
+                if do_replay:
+                    last_replay_save = time.time()
+                checkpoint(do_replay)
+                print(f"[ckpt] steps {state['steps']}" + (" + replay" if do_replay else ""), flush=True)
             # drain
             drained = 0
             while True:
