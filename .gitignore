@@ -1,0 +1,25 @@
+# Gradle / build
+.gradle/
+build/
+out/
+!pretrain/out/
+run/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# Large training checkpoints (regenerate with pretrain/train*.py)
+pretrain/out/checkpoint*.json
+pretrain/out/checkpoint*.npz
+pretrain/out/*.tmp
+pretrain/runs/
+
+# uploaded archives (contents are unpacked into the repo)
+*.zip

@@ -1,0 +1,14 @@
+{
+        "required": true,
+        "package": "dev.z.pvpbot.mixin",
+        "compatibilityLevel": "JAVA_21",
+        "minVersion": "0.8",
+        "client": [
+                "MinecraftClientAccessor",
+                "MouseAccessor",
+                "InGameHudAccessor"
+        ],
+        "injectors": {
+                "defaultRequire": 1
+        }
+}
