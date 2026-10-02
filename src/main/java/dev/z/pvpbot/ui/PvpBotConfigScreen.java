@@ -384,6 +384,12 @@ public final class PvpBotConfigScreen extends Screen {
                                 BotTooltips.PURE_CLOSE, v -> cfg.pureCloseLimit = Math.round(v)));
                 rows.add(new SliderRow("Sprint-gate patience (pure, ticks)", 2, 60, cfg.sprintGatePatiencePure, 0,
                                 BotTooltips.SPRINT_PATIENCE, v -> cfg.sprintGatePatiencePure = Math.round(v)));
+                rows.add(new SliderRow("Click range (blocks, v2.3)", 2.5f, 3.4f, cfg.clickMaxDist, 2,
+                                BotTooltips.CLICK_MAX_DIST, v -> cfg.clickMaxDist = v));
+                rows.add(new SliderRow("v2 learn rate (rapid)", 0f, 0.001f, cfg.v2LrRapid, 5,
+                                BotTooltips.V2_LR, v -> cfg.v2LrRapid = v));
+                rows.add(new SliderRow("v2 learn rate (stable)", 0f, 0.001f, cfg.v2LrStable, 5,
+                                BotTooltips.V2_LR, v -> cfg.v2LrStable = v));
                 rows.add(new ToggleRow("Aim head opt-in (bench until earned)", cfg.pureAimHead,
                                 BotTooltips.PURE_AIM_HEAD, v -> cfg.pureAimHead = v));
                 rows.add(new ToggleRow("Sneak opt-in (bench until earned)", cfg.pureSneak,

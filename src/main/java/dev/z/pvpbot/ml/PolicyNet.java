@@ -1,7 +1,6 @@
 package dev.z.pvpbot.ml;
 
 import dev.z.pvpbot.bot.ActionSpace;
-import dev.z.pvpbot.bot.Perception;
 
 import java.util.Random;
 
@@ -38,8 +37,10 @@ import java.util.Random;
  */
 public final class PolicyNet {
 
-        public static final int IN_DIM = Perception.DIM_V3;               // 104 (v2.1: 84 + 20 advanced data)
-        public static final int[] ARCH = {IN_DIM, 512, 512, 512, 448, 18};
+        /** v2.3: OBSERVATION v4 (100 dims, Minecraft-free, simulator-parity tested). */
+        public static final int IN_DIM = dev.z.pvpbot.ml.obs.ObsV4.DIM;
+        /** v2.3: 100 -> 512 -> 512 -> 256 -> 18 (449k params) — offline-pretrained in the v3 simulator. */
+        public static final int[] ARCH = {IN_DIM, 512, 512, 256, 18};
 
         public static final int MOVES = ActionSpace.MOVES;                // 9
         public static final int MOVE_OFF = 0;
@@ -406,7 +407,7 @@ public final class PolicyNet {
                         float[] err = new float[1];
                         ys[k] = targetVector(sBuf[idx], moveBuf[idx], sprintBuf[idx], jumpBuf[idx], sneakBuf[idx],
                                         aimYawBuf[idx], aimPitBuf[idx], clickBuf[idx],
-                                        rBuf[idx], s2Buf[idx], doneBuf[idx], 0f, err);
+                                        rBuf[idx], s2Buf[idx], doneBuf[idx], 0f, err, gammaN());
                         treeUpdate(idx, err[0] + 1e-3f);
                 }
                 float aimSq = statAimSq, aimN = statAimN, clickSq = statClickSq, clickN = statClickN;
@@ -416,7 +417,7 @@ public final class PolicyNet {
                         float[] err = new float[1];
                         ys[k] = targetVector(eS[idx], eMove[idx], eSprint[idx], eJump[idx], eSneak[idx],
                                         eAimYaw[idx], eAimPit[idx], eClick[idx],
-                                        eR[idx], eS2[idx], eDone[idx], margin, err);
+                                        eR[idx], eS2[idx], eDone[idx], margin, err, gamma);
                 }
                 aimSq += statAimSq;
                 aimN += statAimN;
@@ -453,7 +454,7 @@ public final class PolicyNet {
         private float[] targetVector(float[] s, int move, boolean sprint, boolean jump, boolean sneak,
                                      float aimYawN, float aimPitN, float clickN,
                                      float r, float[] s2, boolean done, float expertMargin,
-                                     float[] errOut) {
+                                     float[] errOut, float discount) {
                 float[] yhat = q.forward(s, null);
                 float[] y = yhat.clone();
 
@@ -469,7 +470,7 @@ public final class PolicyNet {
                 } else {
                         float[] q2on = q.forward(s2, null);
                         int best = argmaxRange(q2on, MOVE_OFF, MOVES);
-                        y[mi] = r + gamma * q2t[MOVE_OFF + best];
+                        y[mi] = r + discount * q2t[MOVE_OFF + best];
                 }
                 if (expertMargin > 0f) {
                         float bestOther = Float.NEGATIVE_INFINITY;
@@ -484,9 +485,9 @@ public final class PolicyNet {
                 }
 
                 // FLAGS: per-flag Bellman (max over the two bits of the target net)
-                y = flagTd(y, q2t, r, s2, done, SPRINT_OFF, sprint, expertMargin);
-                y = flagTd(y, q2t, r, s2, done, JUMP_OFF, jump, expertMargin);
-                y = flagTd(y, q2t, r, s2, done, SNEAK_OFF, sneak, expertMargin);
+                y = flagTd(y, q2t, r, discount, done, SPRINT_OFF, sprint, expertMargin);
+                y = flagTd(y, q2t, r, discount, done, JUMP_OFF, jump, expertMargin);
+                y = flagTd(y, q2t, r, discount, done, SNEAK_OFF, sneak, expertMargin);
 
                 // AIM: supervised regression (identity mask when unlabeled)
                 if (!Float.isNaN(aimYawN)) {
@@ -506,13 +507,13 @@ public final class PolicyNet {
                 return y;
         }
 
-        private float[] flagTd(float[] y, float[] q2t, float r, float[] s2, boolean done,
+        private float[] flagTd(float[] y, float[] q2t, float r, float discount, boolean done,
                                int off, boolean bit, float expertMargin) {
                 int idx = off + (bit ? 1 : 0);
                 if (done) {
                         y[idx] = r;
                 } else if (q2t != null) {
-                        y[idx] = r + gamma * Math.max(q2t[off], q2t[off + 1]);
+                        y[idx] = r + discount * Math.max(q2t[off], q2t[off + 1]);
                 }
                 if (expertMargin > 0f) {
                         int other = off + (bit ? 0 : 1);
@@ -523,6 +524,20 @@ public final class PolicyNet {
 
         public void syncTarget() {
                 target.copyFrom(q);
+        }
+
+        /** v2.3: replay samples hold n-step returns -> bootstrap with gamma^n (was gamma). */
+        private float gammaN() {
+                return (float) Math.pow(gamma, Math.max(1, nStep));
+        }
+
+        /**
+         * v2.3: carry the training volume of a loaded brain (the .pbm header's
+         * step count). Exploration decays with it, so a pretrained brain starts
+         * near the stable epsilon instead of 45% random moves.
+         */
+        public void setTrainSteps(long steps) {
+                trainSteps = Math.max(0L, steps);
         }
 
         // -------------------------------------------------------------- hot-swap + IO
@@ -541,9 +556,9 @@ public final class PolicyNet {
                 NeuralNet net = NeuralNet.loadBinary(in);
                 if (!java.util.Arrays.equals(net.sizes, ARCH)) {
                         throw new java.io.IOException("arch mismatch: file "
-                                        + java.util.Arrays.toString(net.sizes) + " != v2.1 "
+                                        + java.util.Arrays.toString(net.sizes) + " != v2.3 "
                                         + java.util.Arrays.toString(ARCH)
-                                        + " (pre-v2.1 brains read 84 inputs; v2.1 reads 104 with the advanced-data block — retrain)");
+                                        + " (v2.3 brains read the 100-dim ObsV4 input; older v2 brains must be retrained)");
                 }
                 PolicyNet p = new PolicyNet(4096, 1, 0.995f, 20260101L);
                 p.q.copyFrom(net);

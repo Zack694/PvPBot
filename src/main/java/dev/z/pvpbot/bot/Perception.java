@@ -70,7 +70,7 @@ public final class Perception {
                 s[18] = MathHelper.clamp(dy / 4f, -1f, 1f);
 
                 // --- target (19..31)
-                Vec3d tv = target.getVelocity();
+                Vec3d tv = TargetMotion.of(target);
                 float tfx = fx, tfz = fz, trx = rx, trz = rz;
                 s[19] = MathHelper.clamp((float) (tv.x * tfx + tv.z * tfz) / 0.35f, -1.5f, 1.5f); // their vel in MY frame
                 s[20] = MathHelper.clamp((float) (tv.x * trx + tv.z * trz) / 0.35f, -1.5f, 1.5f);

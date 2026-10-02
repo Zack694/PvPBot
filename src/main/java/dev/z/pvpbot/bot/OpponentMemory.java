@@ -184,6 +184,10 @@ public final class OpponentMemory {
         /** Called when THEY hit US. crit = they were falling. */
         public void onTheirHitMe(boolean crit, float theirSpeedNow, float theirVelTowardMeNow) {
                 theirHits += 1f;
+                // v2.3: the aggression feature was never updated (constant 0.1 in
+                // every fight). The v1 brain was pretrained with their hits / 20,
+                // so that is what it gets now.
+                aggression = Math.min(1f, theirHits / 20f);
                 if (crit) critEvents += 1f;
                 // sprint reset signatures: speed collapse right after a hit while they were rushing
                 if (theirSpeedNow > 0.24f && theirVelTowardMeNow > 0.1f) {

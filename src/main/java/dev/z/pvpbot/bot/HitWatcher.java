@@ -135,8 +135,8 @@ public final class HitWatcher {
                         pendingReward -= cfg.humanize ? 0.25f * taken : 0.25f * taken;
                         // combo punishment grows while being comboed
                         if (comboTaken > 2) pendingReward -= 0.04f;
-                        boolean theirCrit = !target.isOnGround() && target.getVelocity().y < 0;
-                        float theirSpeed = (float) Math.sqrt(target.getVelocity().x * target.getVelocity().x + target.getVelocity().z * target.getVelocity().z);
+                        boolean theirCrit = !target.isOnGround() && TargetMotion.of(target).y < 0;
+                        float theirSpeed = (float) Math.sqrt(TargetMotion.of(target).x * TargetMotion.of(target).x + TargetMotion.of(target).z * TargetMotion.of(target).z);
                         Vec3dToSelf(self, target);
                         opp.onTheirHitMe(theirCrit, theirSpeed, velTowardMe);
                         log.addFirst(new TradeEvent(tick, "TAKEN", -taken));
@@ -239,7 +239,7 @@ public final class HitWatcher {
                 double len = Math.sqrt(dx * dx + dz * dz);
                 if (len < 1e-4) { velTowardMe = 0f; return; }
                 double nx = dx / len, nz = dz / len;
-                velTowardMe = (float) (target.getVelocity().x * nx + target.getVelocity().z * nz);
+                velTowardMe = (float) (TargetMotion.of(target).x * nx + TargetMotion.of(target).z * nz);
         }
 
         public float whiffRate() {

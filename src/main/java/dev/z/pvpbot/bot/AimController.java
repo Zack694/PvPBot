@@ -247,8 +247,8 @@ public final class AimController {
         private void noteTargetMotion(LivingEntity t, long tick) {
                 if (tick == lastMotionTick) return; // same game tick — keep the estimate
                 lastMotionTick = tick;
-                vxHist[velHistIdx] = (float) t.getVelocity().x;
-                vzHist[velHistIdx] = (float) t.getVelocity().z;
+                vxHist[velHistIdx] = (float) TargetMotion.of(t).x;
+                vzHist[velHistIdx] = (float) TargetMotion.of(t).z;
                 velHistIdx = (velHistIdx + 1) % vxHist.length;
                 if (velHistIdx == 0) velHistFull = true;
                 if (velHistFull) {
@@ -294,8 +294,8 @@ public final class AimController {
                 } catch (Throwable ignored) {
                         lead = 2;
                 }
-                float vx = (float) t.getVelocity().x, vz = (float) t.getVelocity().z;
-                float vy = (float) t.getVelocity().y;
+                float vx = (float) TargetMotion.of(t).x, vz = (float) TargetMotion.of(t).z;
+                float vy = (float) TargetMotion.of(t).y;
                 if (lead <= 0) return new Vec3d(t.getX(), t.getY(), t.getZ());
                 float lf = lead;
                 float px, pz;
@@ -415,7 +415,7 @@ public final class AimController {
                 // (a ±0.02-block sliver remains, so it never looks locked).
                 float wanderScale = 1f - 0.85f * aw;
                 // features describe the opponent's motion (what a human reads)
-                Vec3d tgtVel = target.getVelocity();
+                Vec3d tgtVel = TargetMotion.of(target);
                 noteTargetMotion(target, tick); // v2.2.0: tick-gated + EMA'd accel
                 float yawRad = (float) Math.toRadians(self.getYaw());
                 float fx = -MathHelper.sin(yawRad), fz = MathHelper.cos(yawRad);

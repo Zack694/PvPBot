@@ -62,6 +62,11 @@ public final class Actuator {
                 set(mc.options.sneakKey, on, K_SNEAK);
         }
 
+        /** v2.3: a bot jump tap is being held right now (ObsV4 own-keys feature). */
+        public boolean jumpHeld() {
+                return jumpHoldTicks > 0;
+        }
+
         public void setJump(boolean on) {
                 if (on) {
                         jumpHoldTicks = 2; // hold for 2 ticks like a human tap, then release

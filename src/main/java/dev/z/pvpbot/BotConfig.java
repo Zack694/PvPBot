@@ -15,7 +15,7 @@ public final class BotConfig {
 
         // v2.2 tuning. MIGRATION: older saved configs keep their old values
         // on disk, so load() upgrades anything below configVersion 12.
-        public int configVersion = 12;
+        public int configVersion = 13;
 
         // ---- v2.2.0 AIM CALM (user: "still a bit wobbly even if Anti Wobble is
         //      set to max") — the master smoothness dial, 0 = raw tracking (old
@@ -204,6 +204,18 @@ public final class BotConfig {
         public int pureSneakMinSteps = 100000;   // sneak promotion bar: minimum training steps
         public boolean pureShaping = true;       // face-target + range reward shaping (a LEARNING signal, not an execution assist)
 
+        // ---- v2.3 BRAIN UPGRADE ----
+        // Click range (feet-to-feet blocks). The live vanilla raycast at click
+        // time already enforces the real 3.0 reach (eye -> hitbox), so the old
+        // 2.95 feet-distance cap only threw away ~0.3 blocks of legal reach
+        // (opponents out-ranged the bot). Shared by v1 and pure mode.
+        public float clickMaxDist = 3.2f;
+        // On-device learning rates for the v2 brain. It now ships PRETRAINED
+        // (hours of simulator training) — the v1 rates (2e-3) would wash that
+        // out within minutes; these keep refining it instead.
+        public float v2LrRapid = 1.0e-4f;
+        public float v2LrStable = 5.0e-5f;
+
         // ---- v2.1.0 VISION RECORDER (player-image dataset builder) ----
         // Captures auto-labeled crops of every visible player straight from the
         // framebuffer (plus matched negatives) to game-dir/pvpbot-vision/ —
@@ -362,7 +374,13 @@ public final class BotConfig {
          *  old on-disk values otherwise). v9 = v2.0 phase 1: threaded aim,
          *  practice-bot targeting, focus mode. */
         private static void migrate(BotConfig c) {
-                if (c.configVersion >= 12) return;
+                if (c.configVersion >= 13) return;
+                // v12 -> v13 (v2.3): reach parity + pretrained-brain learning rates
+                if (c.configVersion < 13) {
+                        c.clickMaxDist = 3.2f;
+                        c.v2LrRapid = 1.0e-4f;
+                        c.v2LrStable = 5.0e-5f;
+                }
                 // v11 -> v12 (v2.2.1): sprint-gate patience + aggression floor
                 // + tightened retreat limit. Gson leaves fields missing from an
                 // old JSON at their JAVA defaults — new knobs MUST get their
@@ -425,7 +443,7 @@ public final class BotConfig {
                         c.pureShaping = true;
                         c.visionRecord = false;
                 }
-                c.configVersion = 12;
+                c.configVersion = 13;
                 c.save();
         }
 

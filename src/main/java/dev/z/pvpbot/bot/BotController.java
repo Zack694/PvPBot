@@ -63,6 +63,7 @@ public final class BotController {
         public int sessionEpisodes, sessionWins, sessionLosses, sessionDraws;
         public long sessionStartTick;
         private LivingEntity prevTarget; // for opponent-death WIN detection
+        private boolean prevTargetAir = false; // v2.3: post-hit jump probe edge
 
         // v2.0 PHASE 1 — sight vector (84-dim observation groundwork) + 120Hz aim thread
         public final Sight sight = new Sight();
@@ -171,6 +172,21 @@ public final class BotController {
         private float lastV2LblAimYaw, lastV2LblAimPit, lastV2LblClick;
         private float lastV2ExpertReward;
         private float prevHumanYaw, prevHumanPitch;
+
+        // ---- v2.3: OBSERVATION v4 (simulator-parity input of the v2 brain) ----
+        public final dev.z.pvpbot.ml.obs.ObsV4 obsV4 = new dev.z.pvpbot.ml.obs.ObsV4();
+        private final dev.z.pvpbot.ml.obs.CombatFrame obsFrame = new dev.z.pvpbot.ml.obs.CombatFrame();
+        private float obsPrevDealt, obsPrevTaken;    // per-tick damage deltas from HitWatcher totals
+        private boolean swungSinceObs;               // a bot click reached the game since the last frame
+        private boolean prevAttackKey;               // human-train: user's click edge
+        // v2.3 FIFO reaction-delay line (pure mode): every decision executes
+        // after its human delay — none is ever dropped (the v1 humanizer queue
+        // discarded decisions made while one was in flight, so the brain was
+        // credited for actions that never ran). Entries: {execTick, action, sneak}.
+        private final java.util.ArrayDeque<long[]> pureDelay = new java.util.ArrayDeque<>();
+        private long pureLastExecTick = -1;
+        private int pureExecAction = 0;
+        private boolean pureExecSneak = false;
 
         // ---- v2.0 PHASE 3-b: eval scorecard (exploration OFF, learning OFF) ---
         private boolean evalMode = false;
@@ -312,6 +328,7 @@ public final class BotController {
                 actuator.releaseAll();
                 zeroPureAimBudget(); // v2.0.1
                 humanizer.clearQueue();
+                clearPureDelay();
                 announce("PAUSED — keys released, your own movement works normally now. /pvpbot resume to continue.");
         }
 
@@ -334,6 +351,7 @@ public final class BotController {
                 actuator.releaseAll();
                 zeroPureAimBudget(); // v2.0.1
                 humanizer.clearQueue();
+                clearPureDelay();
                 finishEpisode("ABORTED");
                 if (wasTraining && sessionEpisodes > 0) {
                         announce(String.format(
@@ -483,7 +501,9 @@ public final class BotController {
                                 // v1.0.8: swap the adaptation profile to this opponent
                                 adapt.switchOpponent(target.getUuid(), target.getName().getString());
                                 if (inEpisode) finishEpisode("DRAW");
+                                obsV4.resetOpponent(); // v2.3: new opponent -> fresh rhythm profile
                         }
+                        TargetMotion.update(target, tickCounter); // v2.3: real velocity from position deltas
                         terrain.sense(mc.world, self, tickCounter);
                         hits.tick(self, target, tickCounter);
                         // v2.0 PHASE 1: reset-tolerant rounds — practice bots that
@@ -513,6 +533,12 @@ public final class BotController {
                                         || tickCounter - hits.theirLastAttackTick <= 2) {
                                 lastTickCombat = true;
                         }
+
+                        // v2.3: ONE ObsV4 frame per tick for every mode (bot, pure,
+                        // human-train). The episode opens first so the frame lands
+                        // in the right round.
+                        if (!inEpisode) beginEpisode();
+                        feedObsV4(self, target);
 
                         if (humanTraining) {
                                 // ---- imitation: watch the user fight, learn from their choices ----
@@ -552,6 +578,7 @@ public final class BotController {
                                 controlling = false;
                         }
                         zeroPureAimBudget(); // v2.0.1: stale aim never yanks at a gone target
+                        TargetMotion.update(null, tickCounter);
                         // while idle (no target) the user's own WASD/mouse are untouched:
                         // walk up to your training partner freely, the bot only watches
                         if (inEpisode && tickCounter - episodeStartTick > cfg.disengageTicksNoCombat * 3) {
@@ -567,17 +594,22 @@ public final class BotController {
                         double mdx = target.getX() - self.getX(), mdz = target.getZ() - self.getZ();
                         double mlen = Math.max(1e-4, Math.sqrt(mdx * mdx + mdz * mdz));
                         double nx = mdx / mlen, nz = mdz / mlen;
-                        float tvx = (float) target.getVelocity().x, tvz = (float) target.getVelocity().z;
+                        float tvx = (float) TargetMotion.of(target).x, tvz = (float) TargetMotion.of(target).z;
                         float towardMe = (float) (tvx * nx + tvz * nz);   // + = closing on me
                         float lateral = (float) (tvx * -nz + tvz * nx);   // circling component
                         memory.tick(self.distanceTo(target),
                                         (float) Math.sqrt(tvx * tvx + tvz * tvz),
                                         towardMe, lateral,
-                                        target.isOnGround() ? 0 : (target.getVelocity().y < 0 ? -1 : 1),
+                                        target.isOnGround() ? 0 : (TargetMotion.of(target).y < 0 ? -1 : 1),
                                         target.isOnGround(),
                                         tickCounter,
                                         target.isSneaking());
                         memory.noteVelocity(tvx, tvz, tickCounter);
+                        // v2.3: the post-hit reaction probe (do they jump / back off
+                        // after my hit?) was never fed — its features sat at 0.
+                        boolean tAir = !target.isOnGround();
+                        memory.probePostHit(tAir && !prevTargetAir, self.distanceTo(target));
+                        prevTargetAir = tAir;
                 } else {
                         memory.tick(99, 0f, 0f, 0f, 0, true, tickCounter, false);
                 }
@@ -672,20 +704,27 @@ public final class BotController {
                 }
                 if (tickCounter % 2 == 1 && tickCounter - lastTrainTick >= Math.max(1, cfg.trainEveryTicks)) {
                         float lr = currentLr();
+                        float lrV2 = currentLrV2();
                         float ratio = cfg.imitationEnabled && dqn.expertSize() >= 64 ? cfg.imitationRatio : 0f;
+                        float ratioV2 = cfg.imitationEnabled && policy.expertSize() >= 64 ? cfg.imitationRatio : 0f;
                         final int batch = cfg.trainBatch;
+                        // v2.3: in pure mode the v1 DQN receives no new experience —
+                        // re-training it on stale replay only cost the phone CPU
+                        final boolean trainV1 = !cfg.pureMode || humanTraining;
                         PvpBot.worker().execute(() -> {
-                                float loss = dqn.trainStep(batch, lr, ratio);
-                                if (!Float.isNaN(loss)) {
-                                        lastTrainLoss = loss;
-                                }
-                                if (dqn.getTrainSteps() % 1000 == 0) {
-                                        dqn.syncTarget();
+                                if (trainV1) {
+                                        float loss = dqn.trainStep(batch, lr, ratio);
+                                        if (!Float.isNaN(loss)) {
+                                                lastTrainLoss = loss;
+                                        }
+                                        if (dqn.getTrainSteps() % 1000 == 0) {
+                                                dqn.syncTarget();
+                                        }
                                 }
                                 // v2.0 PHASE 2-b: the four-head brain trains on the SAME
                                 // cadence — TD on its own replay + margin-cloned demos on
                                 // the expert ring (Phase 2-c), all four heads at once
-                                float v2loss = policy.trainStep(batch, lr, ratio, cfg.imitationMargin);
+                                float v2loss = policy.trainStep(batch, lrV2, ratioV2, cfg.imitationMargin);
                                 if (!Float.isNaN(v2loss)) {
                                         lastV2TrainLoss = v2loss;
                                 }
@@ -698,6 +737,54 @@ public final class BotController {
         }
 
         /**
+         * v2.3 — build this tick's CombatFrame and feed ObsV4. Mirrors the
+         * simulator's frame builder (pretrain/v3/env.py) field for field.
+         */
+        private void feedObsV4(ClientPlayerEntity self, LivingEntity target) {
+                dev.z.pvpbot.ml.obs.CombatFrame f = obsFrame;
+                FrameAdapter.fill(f.me, self);
+                FrameAdapter.fill(f.them, target);
+                f.myCharge = self.getAttackCooldownProgress(0.0f);
+                f.food = self.getHungerManager().getFoodLevel();
+                boolean atkKey = mc.options.attackKey.isPressed();
+                if (humanTraining) {
+                        f.myMove = ActionSpace.moveOf(decodeUserAction(self));
+                        f.myJumpHeld = mc.options.jumpKey.isPressed();
+                } else {
+                        f.myMove = Actuator.currentMoveCombo();
+                        f.myJumpHeld = actuator.jumpHeld();
+                }
+                System.arraycopy(terrain.blocked, 0, f.terrain, 0, 8);
+                f.dropAhead = terrain.floorDropAhead;
+                f.ceilingLow = terrain.ceilingLow;
+                f.los = lineOfSight(self, target);
+                f.crosshairOnTarget = vanillaOnTarget(mc, target);
+                f.iSwung = swungSinceObs || (humanTraining && atkKey && !prevAttackKey);
+                f.iHitThem = hits.lastMyHitTick == tickCounter;
+                f.dmgDealt = f.iHitThem ? Math.max(0f, hits.dmgDealt - obsPrevDealt) : 0f;
+                f.iWasHit = hits.lastTakenHitTick == tickCounter;
+                f.dmgTaken = f.iWasHit ? Math.max(0f, hits.dmgTaken - obsPrevTaken) : 0f;
+                f.iCrit = false;
+                obsPrevDealt = hits.dmgDealt;
+                obsPrevTaken = hits.dmgTaken;
+                swungSinceObs = false;
+                prevAttackKey = atkKey;
+                obsV4.tick(f);
+        }
+
+        /** v2.3: block line of sight eye -> their chest (same probe the v2.0 sight block used). */
+        private static boolean lineOfSight(ClientPlayerEntity self, LivingEntity target) {
+                if (self.getEntityWorld() == null) return true;
+                Vec3d from = self.getEyePos();
+                Vec3d to = new Vec3d(target.getX(), target.getY() + target.getHeight() * 0.6, target.getZ());
+                var hit = self.getEntityWorld().raycast(new net.minecraft.world.RaycastContext(
+                                from, to,
+                                net.minecraft.world.RaycastContext.ShapeType.COLLIDER,
+                                net.minecraft.world.RaycastContext.FluidHandling.NONE, self));
+                return hit == null || hit.getType() == net.minecraft.util.hit.HitResult.Type.MISS;
+        }
+
+        /**
          * v2.0 PHASE 2-b — PURE MODE decision step. The four-head brain
          * (PolicyNet) picks movement, sprint, jump, sneak, aim AND clicks
          * every tick; the v1 chance/technique layers never run. The v1.0.12
@@ -706,9 +793,8 @@ public final class BotController {
          */
         private void pureDecisionStep(ClientPlayerEntity self, LivingEntity target) {
                 if (!inEpisode) beginEpisode();
-                float matchTicks = tickCounter - episodeStartTick;
-                float[] state = perception.buildV3(self, target, hits, memory, terrain,
-                                tickCounter, matchTicks, hits.whiffRate(), sight);
+                // v2.3: the 100-dim ObsV4 vector (fed once per tick in tick())
+                float[] state = obsV4.build();
 
                 // close the previous v2 transition (reward accrued since last tick)
                 if (lastV2State != null) {
@@ -796,36 +882,96 @@ public final class BotController {
                                 && (tickCounter - lastClickTick >= 3)
                                 && (tickCounter - lastMissSwingTick >= missCooldownTicks());
                 boolean clickDue = bandOk && gapsOk && vanillaOnTarget(mc, target)
-                                && self.distanceTo(target) <= 2.95;
+                                && self.distanceTo(target) <= cfg.clickMaxDist;
                 lastV2ClickN = clickDue ? 1f : 0f;
                 lastV2ClickDue = clickDue ? 1f : 0f; // v2.0.2: oracle for the immature click-head fallback
                 lastV2AimYawN = MathHelper.clamp(trYaw / maxDeg, -1f, 1f);
                 lastV2AimPitN = MathHelper.clamp(trPit / maxDeg, -1f, 1f);
 
                 // muscles — ActionSpace has no sneak bit, so it rides alongside.
-                // v2.1.0 SNEAK LAW (mirror of the v1.0.12 ATTACK law): the sneak
-                // muscle is HARD-DISABLED until the user opts in ("/pvpbot v2
-                // sneak on") AND the head has pureSneakMinSteps of training —
-                // and even then a decisive margin (0.25) is still required. An
-                // immature sneak head can press shift ALL it wants in its action
-                // space; the muscle simply never moves. This is the definitive
-                // fix for "the Pure Model always shifts or holds shift".
+                // v2.1.0 SNEAK LAW: the sneak muscle stays HARD-DISABLED until the
+                // user opts in ("/pvpbot v2 sneak on") AND the head has
+                // pureSneakMinSteps of training — and a decisive margin (0.25).
                 pureClickDesire = d.clickDesire;
-                pureSneakIntent = cfg.pureSneak
+                boolean sneak = cfg.pureSneak
                                 && policy.getTrainSteps() >= cfg.pureSneakMinSteps
                                 && d.sneak && d.sneakMargin >= 0.25f;
-                int action = ActionSpace.encode(d.move, d.sprint, d.jump, false);
-                int executed = humanizer.submit(action, lastAction >= 0 ? lastAction : action);
-                applyAction(self, target, executed);
-                sight.noteOwnAction(executed);
-                lastAction = executed;
+                pureSneakIntent = sneak;
+
+                // v2.3: GOVERNORS AT DECISION TIME. They used to rewrite the
+                // DELAYED action inside applyAction, so the stored transition
+                // said "S" while "WA" ran — the brain was credited for moves
+                // that never happened. Now the governed move IS the stored move.
+                double distH = Math.sqrt(Math.pow(target.getX() - self.getX(), 2) + Math.pow(target.getZ() - self.getZ(), 2));
+                int move = governPureMove(d.move, self, target, distH);
+                boolean back = move == ActionSpace.M_S || move == ActionSpace.M_SA || move == ActionSpace.M_SD;
+                // v2.2.0 PURE SPRINT-HIT LAW (forced sprint on every non-retreating,
+                // non-sneaking stance — a walking grounded click is a sweep)
+                boolean sprint = d.sprint || (cfg.sprintHitOnly && !back && !sneak);
+                int action = ActionSpace.encode(move, sprint, d.jump, false);
+
+                // v2.3 FIFO reaction delay: this decision executes after its
+                // human delay; nothing is dropped (see pureDelay).
+                int delay = cfg.humanize ? cfg.reactionMinTicks
+                                + rng.nextInt(Math.max(1, cfg.reactionMaxTicks - cfg.reactionMinTicks + 1)) : 0;
+                long execAt = Math.max(tickCounter + Math.max(0, delay), pureLastExecTick);
+                pureLastExecTick = execAt;
+                pureDelay.addLast(new long[]{execAt, action, sneak ? 1 : 0});
+                while (!pureDelay.isEmpty() && pureDelay.peekFirst()[0] <= tickCounter) {
+                        long[] e = pureDelay.pollFirst();
+                        pureExecAction = (int) e[1];
+                        pureExecSneak = e[2] != 0;
+                }
+                applyAction(self, target, pureExecAction);
+                sight.noteOwnAction(pureExecAction);
+                lastAction = pureExecAction;
                 lastV2State = state;
-                lastV2Move = d.move;
-                lastV2Sprint = d.sprint;
+                lastV2Move = move;
+                lastV2Sprint = sprint;
                 lastV2Jump = d.jump;
-                lastV2Sneak = d.sneak;
+                lastV2Sneak = sneak;
                 lastDecisionTick = tickCounter;
                 trainPulse();
+        }
+
+        /**
+         * v2.2.0 RETREAT GOVERNOR + v2.2.1 AGGRESSION FLOOR, evaluated on the
+         * fresh decision (v2.3). After pureRetreatLimit backward decisions
+         * inside 4.5 blocks the retreat becomes an orbit strafe toward the
+         * target's side; after pureCloseLimit decisions beyond 3.0 blocks the
+         * move becomes a closing move. Neither fires while losing badly.
+         */
+        private int governPureMove(int move, ClientPlayerEntity self, LivingEntity target, double distH) {
+                boolean losingBadly = self.getHealth() < target.getHealth() - 4f;
+                float yawRad = (float) Math.toRadians(self.getYaw());
+                float fx = -MathHelper.sin(yawRad), fz = MathHelper.cos(yawRad);
+                double tdx = target.getX() - self.getX(), tdz = target.getZ() - self.getZ();
+                float cross = (float) (fx * tdz - fz * tdx); // >0 = target on my left
+                if (cfg.pureRetreatLimit > 0) {
+                        boolean back = move == ActionSpace.M_S || move == ActionSpace.M_SA || move == ActionSpace.M_SD;
+                        if (!back) {
+                                pureBackStreak = 0;
+                        } else {
+                                pureBackStreak++;
+                                if (pureBackStreak > cfg.pureRetreatLimit && distH < 4.5f && !losingBadly) {
+                                        move = cross > 0 ? ActionSpace.M_WA : ActionSpace.M_WD;
+                                        hits.pendingReward -= 0.004f;
+                                }
+                        }
+                }
+                if (cfg.pureCloseLimit > 0) {
+                        if (distH > 3.0f && !losingBadly && !self.isSneaking()) {
+                                pureCloseStreak++;
+                                if (pureCloseStreak > cfg.pureCloseLimit) {
+                                        move = Math.abs(cross) < 0.25f ? ActionSpace.M_W
+                                                        : (cross > 0 ? ActionSpace.M_WA : ActionSpace.M_WD);
+                                        hits.pendingReward -= 0.002f;
+                                }
+                        } else {
+                                pureCloseStreak = 0;
+                        }
+                }
+                return move;
         }
 
         /**
@@ -887,6 +1033,14 @@ public final class BotController {
                 }
         }
 
+        /** v2.3: drop queued pure decisions (round boundary / mode switch / stop). */
+        private void clearPureDelay() {
+                pureDelay.clear();
+                pureLastExecTick = -1;
+                pureExecAction = 0;
+                pureExecSneak = false;
+        }
+
         /** Toggle pure mode (command + ClickGUI). Never throws. */
         public void setPureMode(boolean on) {
                 if (cfg.pureMode == on) {
@@ -895,6 +1049,7 @@ public final class BotController {
                 cfg.pureMode = on;
                 cfg.save();
                 zeroPureAimBudget(); // v2.0.1: never carry a budget across the toggle
+                clearPureDelay();
                 // v2.1.0: NEVER cross a mode boundary with shift held — the sneak
                 // governor state dies here too.
                 actuator.setSneak(false);
@@ -988,8 +1143,8 @@ public final class BotController {
                 if (cfg.v2Imitation) {
                         // v2.1.0: expert transitions use the same 104-dim layout the
                         // brain acts on (old 84-dim demos would be rejected by the net)
-                        float[] v2 = perception.buildV3(self, target, hits, memory, terrain,
-                                        tickCounter, matchTicks, hits.whiffRate(), sight);
+                        // v2.3: experts are recorded in the ObsV4 layout the brain acts on
+                        float[] v2 = obsV4.build();
                         if (lastV2Expert != null && lastV2LblMove >= 0) {
                                 policy.rememberExpert(lastV2Expert, lastV2LblMove, lastV2LblSprint,
                                                 lastV2LblJump, lastV2LblSneak, lastV2LblAimYaw, lastV2LblAimPit,
@@ -1033,7 +1188,7 @@ public final class BotController {
 
         private void oppSpeedFeed(LivingEntity target) {
                 if (target != null) {
-                        float sp = (float) Math.sqrt(target.getVelocity().x * target.getVelocity().x + target.getVelocity().z * target.getVelocity().z);
+                        float sp = (float) Math.sqrt(TargetMotion.of(target).x * TargetMotion.of(target).x + TargetMotion.of(target).z * TargetMotion.of(target).z);
                         memory.noteSpeed(sp, 0f);
                 }
         }
@@ -1163,59 +1318,9 @@ public final class BotController {
                 tactics.noteTerrain(terrain);
                 int move = cfg.pureMode ? ActionSpace.moveOf(action)
                                 : tactics.movePolicy(ActionSpace.moveOf(action), self, target, tickCounter, distH, hits.comboDealt, activeTrade);
-                // v2.2.0 RETREAT GOVERNOR (user: "reduce the Pure Model backing off
-                // tooooo much"). The pure brain discovered that backing up dodges
-                // hits short-term and leaned on it. After pureRetreatLimit
-                // consecutive backward ticks inside combat range — and while NOT
-                // losing badly (their HP >= mine + 4) — the retreat is converted
-                // into an orbit strafe toward the side the target sits on, plus a
-                // small reward penalty that teaches the habit away. Outside combat
-                // range retreating stays legal (chasing is the tactics layer's job
-                // in v1; the head may close freely in pure).
-                if (cfg.pureMode && cfg.pureRetreatLimit > 0) {
-                        boolean back = move == ActionSpace.M_S || move == ActionSpace.M_SA
-                                        || move == ActionSpace.M_SD;
-                        if (!back) {
-                                pureBackStreak = 0;
-                        } else {
-                                pureBackStreak++;
-                                boolean losingBadly = self.getHealth() < target.getHealth() - 4f;
-                                if (pureBackStreak > cfg.pureRetreatLimit && distH < 4.5f && !losingBadly) {
-                                        // strafe toward the side the target is on (keeps them centered)
-                                        float yawRad = (float) Math.toRadians(self.getYaw());
-                                        float fx = -MathHelper.sin(yawRad), fz = MathHelper.cos(yawRad);
-                                        double tdx = target.getX() - self.getX(), tdz = target.getZ() - self.getZ();
-                                        float cross = (float) (fx * tdz - fz * tdx); // >0 = target on my left
-                                        move = cross > 0 ? ActionSpace.M_WA : ActionSpace.M_WD;
-                                        hits.pendingReward -= 0.004f; // teaching signal: retreating in range costs
-                                }
-                        }
-                }
-                // v2.2.1 AGGRESSION FLOOR (user: "reduce the Pure Model backing
-                // off tooooo much" — the retreat governor only catches BACKWARD
-                // moves; the brain also learned to idle-strafe (A/D/NONE) just
-                // outside reach where nothing ever happens). After
-                // pureCloseLimit consecutive ticks beyond 3.0m — and while not
-                // losing badly — the movement is overridden with a CLOSING move
-                // toward the target until the bot is back inside the pocket.
-                if (cfg.pureMode && cfg.pureCloseLimit > 0) {
-                        boolean losingBadly = self.getHealth() < target.getHealth() - 4f;
-                        if (distH > 3.0f && !losingBadly && !self.isSneaking()) {
-                                pureCloseStreak++;
-                                if (pureCloseStreak > cfg.pureCloseLimit) {
-                                        float yawRad = (float) Math.toRadians(self.getYaw());
-                                        float fx = -MathHelper.sin(yawRad), fz = MathHelper.cos(yawRad);
-                                        double tdx = target.getX() - self.getX(), tdz = target.getZ() - self.getZ();
-                                        float cross = (float) (fx * tdz - fz * tdx); // >0 = target on my left
-                                        move = Math.abs(cross) < 0.25f ? ActionSpace.M_W
-                                                        : (cross > 0 ? ActionSpace.M_WA : ActionSpace.M_WD);
-                                        // teaching signal: hovering out of range pays too
-                                        hits.pendingReward -= 0.002f;
-                                }
-                        } else {
-                                pureCloseStreak = 0;
-                        }
-                }
+                // v2.3: the pure retreat governor + aggression floor moved to
+                // DECISION time (governPureMove) so the stored transition holds
+                // the move that really executes.
                 actuator.setMove(move);
                 boolean wtapActive = wtapIsTapMove(move);
                 boolean backMove = move == ActionSpace.M_S || move == ActionSpace.M_SA
@@ -1237,7 +1342,7 @@ public final class BotController {
                 // the bot walking, the sprint-hit gate then blocked every click
                 // ("pure model should attack immediately when its crosshair can
                 // hit the hitbox") AND produced sweep hits when one slipped through.
-                if (cfg.pureMode && cfg.sprintHitOnly && !wtapActive && !backMove && !pureSneakIntent) {
+                if (cfg.pureMode && cfg.sprintHitOnly && !wtapActive && !backMove && !pureExecSneak) {
                         sprintIntent = true;
                 }
                 actuator.setSprint(sprintIntent);
@@ -1250,7 +1355,7 @@ public final class BotController {
                         // grounded and in range, and can NEVER hold longer than 8
                         // consecutive ticks (then a 10-tick forced cooldown) — a
                         // human sneak window, never a crouch-lock.
-                        boolean wantSneak = pureSneakIntent && self.isOnGround() && dist <= 3.2;
+                        boolean wantSneak = pureExecSneak && self.isOnGround() && dist <= 3.2;
                         if (!wantSneak) {
                                 pureSneakHoldTicks = 0;
                                 actuator.setSneak(false);
@@ -1430,7 +1535,10 @@ public final class BotController {
                 // the very next tick re-evaluates with the fresh percentage.
                 boolean bandOk = charge >= cfg.attackCooldownMin
                                 && (charge <= cfg.attackCooldownMax || charge >= 0.999f);
-                if (attackIntent && bandOk && missCooldownOver && swingGapOver && clickGapOver && dist <= 2.95) {
+                // v2.3 REACH PARITY: the live vanilla raycast (vanillaOnTarget)
+                // already enforces the real 3.0 eye->hitbox reach; the old 2.95
+                // feet-distance cap threw ~0.3 blocks of legal reach away.
+                if (attackIntent && bandOk && missCooldownOver && swingGapOver && clickGapOver && dist <= cfg.clickMaxDist) {
                         boolean paced;
                         if (noCooldownServer) {
                                 paced = humanizer.clickPaceAllowed((int) (tickCounter - hits.lastAttackAttemptTick), activeTrade);
@@ -1474,7 +1582,7 @@ public final class BotController {
                                 // descent hits must stay possible). Sneak windows are the
                                 // deliberate exception: a shift-click is the sneak-hit
                                 // technique the config asks for.
-                                boolean sneakClick = cfg.pureMode ? pureSneakIntent : tactics.sneakWindowOpen();
+                                boolean sneakClick = cfg.pureMode ? pureExecSneak : tactics.sneakWindowOpen();
                                 if (cfg.sprintHitOnly && self.isOnGround() && !self.isSprinting()
                                                 && !sneakClick && !sprintGateBypass) {
                                         // sprint is forced on above — it engages within a tick
@@ -1530,6 +1638,7 @@ public final class BotController {
                                                         lastAnySwingTick = tickCounter; // absolute governor counts EVERY swing
                                                         lastClickTick = tickCounter;     // v1.0.11: ...and EVERY click
                                                         if (swung) {
+                                                                swungSinceObs = true; // v2.3 ObsV4 own-swing event
                                                                 hits.markAttackAttempt(tickCounter, !self.isOnGround() && self.getVelocity().y < 0, self.isSprinting());
                                                                 // v1.0.9: verify the meter actually drained — a
                                                                 // real attack always does. If somehow not (frame
@@ -1715,6 +1824,12 @@ public final class BotController {
                 actuator.setSneak(false);    // v2.1.0: release shift across round boundaries
                 lastPureFaceErr = -1f;       // v2.1.0: face-error shaping starts fresh
                 zeroPureAimBudget(); // v2.0.1: locked reset (aim thread may be draining)
+                // v2.3: ObsV4 round boundary (opponent profile kept) + delay line
+                obsV4.resetEpisode();
+                obsPrevDealt = 0f;
+                obsPrevTaken = 0f;
+                swungSinceObs = false;
+                clearPureDelay();
                 hits.resetEpisode(mc.player, selector.target());
                 aim.resetFight();
                 tactics.resetFight();
@@ -1788,7 +1903,18 @@ public final class BotController {
                 // thread guarantees the save lands AFTER the burst.
                 final int burstBatch = Math.max(16, cfg.trainBatch);
                 final float burstLr = currentLr();
-                PvpBot.worker().execute(() -> {
+                final float burstLrV2 = currentLrV2();
+                final boolean burstV2 = cfg.pureMode;
+                final boolean burstAny = !evalMode; // eval measures the brain — no learning
+                final float burstRatioV2 = cfg.imitationEnabled && policy.expertSize() >= 64 ? cfg.imitationRatio : 0f;
+                if (burstAny) PvpBot.worker().execute(() -> {
+                        if (burstV2) {
+                                // v2.3: the pure brain is the one that just played
+                                for (int i = 0; i < 16; i++) {
+                                        policy.trainStep(burstBatch, burstLrV2, burstRatioV2, cfg.imitationMargin);
+                                }
+                                return;
+                        }
                         for (int i = 0; i < 16; i++) {
                                 dqn.trainStep(burstBatch, burstLr);
                         }
@@ -1898,6 +2024,11 @@ public final class BotController {
 
         public float currentLr() {
                 return episodesDone < cfg.curriculumEpisodes ? cfg.lrRapid : cfg.lrStable;
+        }
+
+        /** v2.3: the (pretrained) v2 brain refines with its own, much smaller rates. */
+        public float currentLrV2() {
+                return episodesDone < cfg.curriculumEpisodes ? cfg.v2LrRapid : cfg.v2LrStable;
         }
 
         public String curriculumPhase() {

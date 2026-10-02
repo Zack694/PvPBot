@@ -57,6 +57,15 @@ public final class PvpBot {
          *  296,712 parameters ≈ 1.13 MB of float32 weights (the "1 MB brain"). */
         public static final int[] POLICY_ARCH = {dev.z.pvpbot.bot.Perception.DIM, 480, 480, 72};
 
+        /** v2.3: offline-pretrained four-head brain shipped inside the jar. */
+        public static final String BUNDLED_V2 = "/assets/pvpbot/model/brain_v2.pbm";
+        private boolean bundledV2Loaded = false;
+
+        /** True when the running v2 brain came from the bundled pretrained file. */
+        public boolean bundledV2Loaded() {
+                return bundledV2Loaded;
+        }
+
         private PvpBot() {
                 this.config = BotConfig.load();
                 this.dqn = buildPolicy();
@@ -94,11 +103,27 @@ public final class PvpBot {
                         if (java.nio.file.Files.exists(auto)) {
                                 PolicyNet loaded = ModelStore.readPolicyNet(auto);
                                 p.loadWeights(loaded);
+                                p.setTrainSteps(loaded.getTrainSteps());
                                 LOGGER.info("[pvpbot] v2 four-head brain restored from {} ({} steps)",
                                                 auto.getFileName(), p.getTrainSteps());
+                                return p;
                         }
                 } catch (Exception e) {
-                        LOGGER.warn("[pvpbot] v2 brain restore failed ({}) — starting fresh", e.toString());
+                        LOGGER.warn("[pvpbot] v2 autosave unusable ({}) — loading the bundled pretrained brain", e.toString());
+                }
+                // v2.3: the BUNDLED offline-pretrained brain (hours of simulator
+                // self-play + scripted opponents) — pure mode no longer starts
+                // from random weights.
+                try (InputStream is = PvpBot.class.getResourceAsStream(BUNDLED_V2)) {
+                        if (is != null) {
+                                PolicyNet loaded = ModelStore.readPolicyNet(is);
+                                p.loadWeights(loaded);
+                                p.setTrainSteps(loaded.getTrainSteps());
+                                bundledV2Loaded = true;
+                                LOGGER.info("[pvpbot] v2 brain: bundled pretrained model ({} offline steps)", p.getTrainSteps());
+                        }
+                } catch (Exception e) {
+                        LOGGER.warn("[pvpbot] bundled v2 brain unusable ({}) — starting fresh", e.toString());
                 }
                 return p;
         }

@@ -281,5 +281,13 @@ public final class BotTooltips {
                 "The sessions are produced from PvP videos (good pvper gameplay + visible keystrokes) by scripts/il_extract.py in the source zip: keystrokes via HUD analysis/OCR, the opponent's screen position via color/YOLO detection, attack timings via the cooldown bar.\n" +
                 "Loaded demos steer all later training via DQfD margin cloning. Check the live status line below, /pvpbot il status, or the buttons here.");
 
+        public static final Text CLICK_MAX_DIST = t(
+                "v2.3 click range (feet-to-feet blocks, v1 + pure). Every click still needs vanilla's own live raycast to hit the opponent's hitbox within the real 3.0 reach, so this is only an outer sanity cap.\n" +
+                "The old hard 2.95 cap threw away ~0.3 blocks of legal reach (reach is measured eye -> nearest hitbox point, ~3.3 center-to-center) and let opponents out-range the bot. 3.2 = default.");
+
+        public static final Text V2_LR = t(
+                "v2.3 on-device learning rates of the v2 brain (rapid = first curriculum episodes, stable = afterwards). The brain ships PRETRAINED from hours of simulator training; the v1 rates (0.002) would wash that out within minutes.\n" +
+                "Defaults 0.0001 / 0.00005. Raise only if you want it to re-learn fast from your own fights.");
+
         private BotTooltips() {}
 }

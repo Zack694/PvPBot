@@ -340,7 +340,7 @@ public final class CombatTactics {
         private void updateChase(ClientPlayerEntity self, LivingEntity target, double distH, long tick) {
                 // velocity EMA — smooths their zigzag so a stutter-runner's AVERAGE
                 // path is what we intercept
-                float vx = (float) target.getVelocity().x, vz = (float) target.getVelocity().z;
+                float vx = (float) TargetMotion.of(target).x, vz = (float) TargetMotion.of(target).z;
                 chaseVxEma += 0.15f * (vx - chaseVxEma);
                 chaseVzEma += 0.15f * (vz - chaseVzEma);
 

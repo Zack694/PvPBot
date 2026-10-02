@@ -271,14 +271,14 @@ public final class DecisionMind {
                 // they retreat: their velocity pointing away from me (smoothed)
                 double dx = self.getX() - target.getX(), dz = self.getZ() - target.getZ();
                 double len = Math.sqrt(dx * dx + dz * dz);
-                float away = len < 1e-4 ? 0f : (float) (target.getVelocity().x * dx / len + target.getVelocity().z * dz / len);
+                float away = len < 1e-4 ? 0f : (float) (TargetMotion.of(target).x * dx / len + TargetMotion.of(target).z * dz / len);
                 float towardMe = -away;
                 f[10] = MathHelper.clamp(away * 4f, -1f, 1f) > 0.25f
                                 ? MathHelper.clamp(away * 4f, 0f, 1f) : 0f;
                 f[11] = myCharge;
                 // v1.0.8 — timing & terrain features the mind reasons with
                 f[13] = target.isOnGround() ? 0f
-                                : (target.getVelocity().y > 0.05 ? 1f : 0.5f); // theyAirborne (rising = prime denial)
+                                : (TargetMotion.of(target).y > 0.05 ? 1f : 0.5f); // theyAirborne (rising = prime denial)
                 f[14] = hits.theirAttackIntervalTicks > 0f
                                 ? MathHelper.clamp((14f - hits.theirAttackIntervalTicks) / 8f, 0f, 1f)
                                 : 0f;                                          // theirTempoFast (fast swinger)

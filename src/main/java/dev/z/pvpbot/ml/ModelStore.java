@@ -288,6 +288,8 @@ public final class ModelStore {
                                 if (h.kind() == KIND_V2POLICY) {
                                         PolicyNet net = PolicyNet.loadBinary(in);
                                         bot.policy().loadWeights(net);
+                                        // v2.3: the brain's training volume rides along (exploration decay)
+                                        bot.policy().setTrainSteps(h.trainSteps());
                                         setActive(fn);
                                         return "[v2] " + h.name();
                                 }
@@ -320,13 +322,21 @@ public final class ModelStore {
 
         /** Read ONLY the kind-3 payload of a .pbm file (used by the v2 autosave restore). */
         public static PolicyNet readPolicyNet(Path file) throws IOException {
-                try (DataInputStream in = new DataInputStream(Files.newInputStream(file))) {
-                        Header h = readHeader(in);
-                        if (h.kind() != KIND_V2POLICY) {
-                                throw new IOException("not a v2 four-head model");
-                        }
-                        return PolicyNet.loadBinary(in);
+                try (java.io.InputStream raw = Files.newInputStream(file)) {
+                        return readPolicyNet(raw);
                 }
+        }
+
+        /** v2.3: read a kind-3 brain from any stream (bundled jar resource or file); steps carried. */
+        public static PolicyNet readPolicyNet(java.io.InputStream raw) throws IOException {
+                DataInputStream in = new DataInputStream(new java.io.BufferedInputStream(raw));
+                Header h = readHeader(in);
+                if (h.kind() != KIND_V2POLICY) {
+                        throw new IOException("not a v2 four-head model");
+                }
+                PolicyNet p = PolicyNet.loadBinary(in);
+                p.setTrainSteps(h.trainSteps());
+                return p;
         }
 
         public static void delete(String fileName) throws IOException {

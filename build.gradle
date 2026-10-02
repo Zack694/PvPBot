@@ -16,6 +16,21 @@ dependencies {
         // Compile-only + suggested (NOT required at runtime) — the built-in screen
         // is used when Cloth Config is absent.
         modCompileOnly "me.shedaniel.cloth:cloth-config-fabric:21.11.151"
+
+        // v2.3: ObsV4 Java <-> Python simulator parity test
+        testImplementation platform("org.junit:junit-bom:5.11.4")
+        testImplementation "org.junit.jupiter:junit-jupiter"
+        testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+        testImplementation "com.google.code.gson:gson:2.11.0"
+}
+
+test {
+        useJUnitPlatform()
+        testLogging {
+                events "passed", "failed"
+                showStandardStreams = true
+                exceptionFormat "full"
+        }
 }
 
 processResources {

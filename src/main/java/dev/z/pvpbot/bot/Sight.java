@@ -77,7 +77,7 @@ public final class Sight {
                 tSneak[tIdx] = target.isSneaking();
                 if (target.isSneaking()) theirLastSneakTick = tick;
                 // jump detection: ground -> air edge
-                if (!target.isOnGround() && theirAirPrev && Math.abs(target.getVelocity().y) < 0.5f) {
+                if (!target.isOnGround() && theirAirPrev && Math.abs(TargetMotion.of(target).y) < 0.5f) {
                         theirLastJumpTick = tick;
                 }
                 theirAirPrev = !target.isOnGround();
@@ -100,7 +100,7 @@ public final class Sight {
                         float yawRad = (float) Math.toRadians(self.getYaw());
                         float fx = -MathHelper.sin(yawRad), fz = MathHelper.cos(yawRad);
                         float rx = -fz, rz = fx;
-                        Vec3d tv = target.getVelocity();
+                        Vec3d tv = TargetMotion.of(target);
                         float fwd = (float) (tv.x * fx + tv.z * fz);
                         float str = (float) (tv.x * rx + tv.z * rz);
                         tFwd[aIdx] = fwd;
@@ -251,7 +251,7 @@ public final class Sight {
 
                 // 14: their closing speed (relative velocity along the line to me)
                 // vector target->me = (-dx,-dz); towardMe = tv . unit(target->me)
-                Vec3d tv = target.getVelocity();
+                Vec3d tv = TargetMotion.of(target);
                 double inv = 1.0 / Math.max(1e-4, Math.sqrt(dx * dx + dz * dz));
                 float towardMe = (float) ((-dx) * tv.x * inv + (-dz) * tv.z * inv); // + = closing
                 s[14] = MathHelper.clamp(towardMe / 0.6f, -1.5f, 1.5f);

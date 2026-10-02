@@ -248,7 +248,7 @@ public final class Dqn {
                         actIdx[k] = aBuf[idx];
                         isExpert[k] = false;
                         float[] err = new float[1];
-                        ys[k] = tdTarget(sBuf[idx], aBuf[idx], rBuf[idx], s2Buf[idx], doneBuf[idx], 0f, err);
+                        ys[k] = tdTarget(sBuf[idx], aBuf[idx], rBuf[idx], s2Buf[idx], doneBuf[idx], 0f, err, gammaN());
                         treeUpdate(idx, err[0] + 1e-3f);
                 }
                 for (int i = 0; i < nExpert; i++, k++) {
@@ -257,7 +257,7 @@ public final class Dqn {
                         actIdx[k] = eA[idx];
                         isExpert[k] = true;
                         float[] err = new float[1];
-                        ys[k] = tdTarget(eS[idx], eA[idx], eR[idx], eS2[idx], eDone[idx], margin, err);
+                        ys[k] = tdTarget(eS[idx], eA[idx], eR[idx], eS2[idx], eDone[idx], margin, err, gamma);
                 }
                 trainSteps++;
                 return q.trainBatch(xs, ys, lr);
@@ -268,8 +268,19 @@ public final class Dqn {
                 return trainStep(batch, lr, 0f);
         }
 
+        /**
+         * v2.3 N-STEP DISCOUNT FIX — a non-terminal replay sample holds an
+         * n-step return R_t:t+n and the state n steps later, so it must
+         * bootstrap with gamma^n. The old code used gamma for every sample,
+         * i.e. it valued the future as if it were 1 step away (3-step
+         * returns overestimated the tail by ~1%/step).
+         */
+        private float gammaN() {
+                return (float) Math.pow(gamma, Math.max(1, nStep));
+        }
+
         private float[] tdTarget(float[] s, int a, float r, float[] s2, boolean done, float expertMargin,
-                                 float[] errOut) {
+                                 float[] errOut, float discount) {
                 float[] qsa = q.forward(s, null);
                 float[] y = qsa.clone();
                 if (done) {
@@ -280,7 +291,7 @@ public final class Dqn {
                         int bestA = argmax(q2on);
                         float[] q2t = target.forward(s2, null);
                         float tv = q2t[bestA];
-                        y[a] = r + gamma * tv;
+                        y[a] = r + discount * tv;
                 }
                 if (expertMargin > 0f) {
                         // large-margin cloning: the demonstrated action must stay
