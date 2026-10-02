@@ -40,13 +40,15 @@ from replay import Replay  # noqa: E402
 
 # v2.3.2 adaptive curriculum: base weights, scaled up for opponent types the
 # brain currently loses to (per-actor win-rate EMA)
-CURRICULUM = {None: 3.0, "practice": 2.0, "crit": 1.0, "critpro": 1.5, "combo": 1.5, "kiter": 1.0, "jitter": 1.0}
+CURRICULUM = {None: 3.0, "practice": 2.0, "crit": 1.0, "critpro": 1.5, "combo": 1.5, "kiter": 1.0, "jitter": 1.0,
+              "outspace": 1.5, "pcrit": 1.5}
 PRESETS = list(CURRICULUM.keys())
 BENCH = [("scripted", None, 101), ("scripted", None, 202), ("scripted", "practice", 303),
          ("scripted", "practice", 404), ("scripted", "crit", 505), ("scripted", "kiter", 606),
          ("scripted", "jitter", 707), ("scripted", None, 808),
-         ("scripted", "critpro", 909), ("scripted", "combo", 1010)]
-BENCH_SIG = "v2.3.2-10"
+         ("scripted", "critpro", 909), ("scripted", "combo", 1010),
+         ("scripted", "outspace", 1111), ("scripted", "pcrit", 1212)]
+BENCH_SIG = "v2.3.3-12"
 
 
 def default_cfg():

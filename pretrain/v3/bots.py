@@ -454,6 +454,17 @@ class ScriptedCtl:
             self.skill = u(0.8, 1.0)
             self.p.update(react=int(rng.integers(1, 3)), crit=1.0, critpro=True, thr_lo=u(0.88, 0.95), thr_w=0.04,
                           jreset=u(0.3, 0.8), spam=False, styles=[0.7, 0.2, 0.05, 0.0, 0.05])
+        elif preset == "outspace":
+            # wiki "outspacing": hovers at the edge of reach, steps in only when charged
+            self.skill = u(0.8, 1.0)
+            self.p.update(react=int(rng.integers(1, 3)), outspace=True, thr_lo=u(0.9, 0.97), thr_w=0.03, spam=False,
+                          stap=u(0.3, 0.7), stap_len=(2, 5), jreset=u(0.4, 0.9), crit=0.0,
+                          styles=[0.1, 0.4, 0.2, 0.0, 0.3])
+        elif preset == "pcrit":
+            # wiki "p-crit": uses the vertical KB of YOUR hit to crit you on the way down
+            self.skill = u(0.8, 1.0)
+            self.p.update(react=int(rng.integers(1, 3)), pcrit=True, thr_lo=u(0.85, 0.94), thr_w=0.04, spam=False,
+                          jreset=0.0, crit=u(0.0, 0.2), wtap=u(0.2, 0.6), styles=[0.7, 0.2, 0.05, 0.0, 0.05])
         elif preset == "combo":
             # keeps you in a combo: rush, short w-taps after every hit, jump resets
             self.skill = u(0.85, 1.0)
@@ -481,11 +492,13 @@ class ScriptedCtl:
         self.queue = []
         self.cur = (1, 0, False, True, False)
         self.sneak_until = -1
+        self.hurt_tick = -100
 
     def _roll_thr(self):
         return min(1.0, self.p["thr_lo"] + self.rng.random() * self.p["thr_w"])
 
     def on_hurt(self, t):
+        self.hurt_tick = t
         if self.rng.random() < self.p["jreset"]:
             self.jump_at = t + int(self.rng.integers(0, 3))
 
@@ -528,6 +541,13 @@ class ScriptedCtl:
         elif self.plan == "pocket":
             fwd = 1 if dh > 3.1 else (-1 if dh < 2.2 else 0)
             right = self.strafe
+        if p.get("outspace"):
+            edge = 3.05 if me.charge() >= self.thr - 0.1 else 3.6
+            fwd = 1 if dh > edge + 0.25 else (-1 if dh < edge - 0.25 else 0)
+        pcrit_air = p.get("pcrit") and t - self.hurt_tick <= 14 and not me.on_ground
+        if pcrit_air:
+            fwd = 0   # no W in the air: sprint drops, so the descending hit is a crit
+            me.sprinting = False
         if dh < 1.0:
             fwd = -1
         if t < self.tap_until:
@@ -567,7 +587,7 @@ class ScriptedCtl:
         if on_target(me, view, world):
             if p["spam"]:
                 want = t - self.last_click >= p["spam_gap"]
-            elif self.crit_mode and not me.on_ground:
+            elif (self.crit_mode or pcrit_air) and not me.on_ground:
                 want = me.vy < 0 and me.charge() >= self.thr - 0.05
             else:
                 want = me.charge() >= self.thr and t - self.last_click >= 2

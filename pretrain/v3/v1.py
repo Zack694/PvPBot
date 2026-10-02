@@ -59,6 +59,12 @@ class V1Cfg:
     backoff_release = 2.1
     backoff_max = 24
     sprint_patience = 60
+    combo_breaker = True
+    crit_denial = True
+    hit_select = False     # wiki: sprint-hit right after the opponent swings (less KB taken)
+    hit_select_wait = 4
+    pcrit = False          # wiki: crit off the vertical KB of their hit (no own jump)
+    fifo = True            # v2.3.3 Java parity: no-drop reaction delay line
 
 
 BACKOFF_ARC = (7, 8, 2, 8, 7, 8, 6, 7)
@@ -157,6 +163,8 @@ class V1Ctl(LearnerCtl):
         self.cb_dir = 1
         self.cd_left = 0
         self.t_air_prev = False
+        self.hs_wait = 0
+        self.pcrit_until = -1
 
     # ------------------------------------------------------------ hit watch
     def hitwatch_v1(self, t, dealt, took, view, vview, me):
@@ -328,6 +336,8 @@ class V1Ctl(LearnerCtl):
 
     def on_hurt(self, t, probes):
         c = self.v1
+        if c.pcrit:
+            self.pcrit_until = t + 14
         ms = c.jreset_ms[0] + int(self.rng.integers(0, max(1, c.jreset_ms[1] - c.jreset_ms[0] + 1)))
         self.jr_at = t + max(1, round(ms / 50.0))
         side = probes[1] > 0.5 or probes[2] > 0.5 or probes[6] > 0.5 or probes[7] > 0.5
@@ -422,7 +432,7 @@ class V1Ctl(LearnerCtl):
                 return self.escape_move
             self.escape_left = 0
         # v2.3.2 combo breaker
-        if self.combo_taken >= 2 and dh < 4.0:
+        if self.v1.combo_breaker and self.combo_taken >= 2 and dh < 4.0:
             if self.cb_left <= 0:
                 self.cb_left = 8 + int(self.rng.integers(0, 5))
                 self.cb_dir = self._side_from_aim(me, view, t)
@@ -434,7 +444,7 @@ class V1Ctl(LearnerCtl):
             return 6 if self.cb_dir > 0 else 5
         self.cb_left = 0
         # v2.3.2 crit denial
-        if self.cd_left > 0:
+        if self.v1.crit_denial and self.cd_left > 0:
             self.cd_left -= 1
             if view.on_ground:
                 self.cd_left = 0
@@ -462,6 +472,8 @@ class V1Ctl(LearnerCtl):
             if mv == 2 and (probes[3] > 0.5 or probes[4] > 0.5 or probes[5] > 0.5):
                 mv = 5 if seg % 2 == 0 else 6
             return mv
+        if self.v1.pcrit and t <= self.pcrit_until and not me.on_ground and dh <= 3.6:
+            return 4 if self._side_from_aim(me, view, t) > 0 else 3   # strafe, no W: sprint drops
         if self.crit_window > 0:
             self.crit_window -= 1
             if me.on_ground:
@@ -517,15 +529,22 @@ class V1Ctl(LearnerCtl):
         c = self.v1
         # Humanizer.submit (single-slot, drops while in flight)
         delay = c.react_min + int(self.rng.integers(0, max(1, c.react_max - c.react_min + 1)))
-        if self.q_action < 0:
+        if c.fifo:
+            et = max(t + delay, self.last_exec_tick)
+            self.last_exec_tick = et
+            self.pipe.append((et, a))
+            while self.pipe and self.pipe[0][0] <= t:
+                self.exec_a = self.pipe.pop(0)[1]
+        elif self.q_action < 0:
             self.q_action = a
             self.q_ticks = delay
-        if self.q_ticks <= 0:
-            self.exec_a = self.q_action
-            self.q_action = -1
-            self.q_ticks = -1
-        else:
-            self.q_ticks -= 1
+        if not c.fifo:
+            if self.q_ticks <= 0:
+                self.exec_a = self.q_action
+                self.q_action = -1
+                self.q_ticks = -1
+            else:
+                self.q_ticks -= 1
         ex = self.exec_a
         active_trade = self.combo_dealt >= 1 or t - max(self.last_my_hit_tick, self.last_taken_tick) <= 40
         mv = self.move_policy(t, move_of(ex), me, view, vview, probes, active_trade)
@@ -607,6 +626,15 @@ class V1Ctl(LearnerCtl):
             return False
         if self.crit_window > 0 and me.vy >= 0:
             return False
+        if c.pcrit and t <= self.pcrit_until and not me.on_ground and me.vy >= 0:
+            return False   # p-crit: wait for the descent
+        if c.hit_select and self.combo_dealt == 0 and not self.attack_in_flight:
+            their_ready = t - self.their_last_attack >= 10
+            just_swung = t - self.their_last_attack <= 1
+            if their_ready and not just_swung and d3 <= 3.3 and self.hs_wait < c.hit_select_wait:
+                self.hs_wait += 1
+                return False
+        self.hs_wait = 0
         if not sneak_click and self.wtap_left <= 0 and not self.backoff:
             if t - self.last_sneak_hit >= c.sneak_cd and self.rng.random() < c.sneak_chance:
                 self.last_sneak_hit = t
