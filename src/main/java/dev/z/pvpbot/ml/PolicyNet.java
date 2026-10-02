@@ -566,6 +566,11 @@ public final class PolicyNet {
                 return p;
         }
 
+        /** v2.3: raw 18-dim head output (diagnostics + bundled-brain parity test). */
+        public float[] forward(float[] s) {
+                return q.forward(s, null);
+        }
+
         public String archSummary() {
                 StringBuilder sb = new StringBuilder();
                 for (int i = 0; i < q.sizes.length; i++) {

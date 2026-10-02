@@ -1110,8 +1110,10 @@ public final class BotController {
                 String sneakG = cfg.pureSneak
                                 ? (policy.getTrainSteps() >= cfg.pureSneakMinSteps ? "armed" : "bench (" + policy.getTrainSteps() + "/" + cfg.pureSneakMinSteps + " steps)")
                                 : "off";
-                return String.format("v2 %s | buf %d | expert %d | steps %d | loss %s | aimLoss %s | aimHead %s | sneak %s",
-                                cfg.pureMode ? "PURE" : "watch", policy.bufferSize(), policy.expertSize(),
+                boolean bundled = PvpBot.get() != null && PvpBot.get().bundledV2Loaded();
+                return String.format("v2 %s%s | buf %d | expert %d | steps %d | loss %s | aimLoss %s | aimHead %s | sneak %s",
+                                cfg.pureMode ? "PURE" : "watch", bundled ? " (pretrained v2.3 brain)" : "",
+                                policy.bufferSize(), policy.expertSize(),
                                 policy.getTrainSteps(), loss, aim, aimG, sneakG);
         }
 

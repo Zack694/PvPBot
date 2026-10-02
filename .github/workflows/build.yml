@@ -53,7 +53,8 @@ jobs:
           python-version: "3.12"
       - name: Install numpy
         run: pip install numpy
-      - name: Trainer smoke test
-        working-directory: pretrain
+      - name: Simulator smoke test (v3)
+        working-directory: pretrain/v3
         run: |
-          if [ -f smoke_test.py ]; then python smoke_test.py; else python -m py_compile *.py; fi
+          python -m py_compile *.py
+          python smoke_test.py
