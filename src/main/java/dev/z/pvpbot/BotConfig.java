@@ -15,7 +15,7 @@ public final class BotConfig {
 
         // v2.2 tuning. MIGRATION: older saved configs keep their old values
         // on disk, so load() upgrades anything below configVersion 12.
-        public int configVersion = 16;
+        public int configVersion = 17;
 
         // ---- v2.2.0 AIM CALM (user: "still a bit wobbly even if Anti Wobble is
         //      set to max") — the master smoothness dial, 0 = raw tracking (old
@@ -225,6 +225,7 @@ public final class BotConfig {
         // v2.3.5 classic: attack the instant it can, and let the brain own its moves
         public boolean immediateAttack = true;
         public boolean classicFreeMovement = true;
+        public boolean aimStrafePredict = true;   // v2.3.6 strafe-reversal + ping aware lead
 
         // ---- v2.1.0 VISION RECORDER (player-image dataset builder) ----
         // Captures auto-labeled crops of every visible player straight from the
@@ -384,7 +385,8 @@ public final class BotConfig {
          *  old on-disk values otherwise). v9 = v2.0 phase 1: threaded aim,
          *  practice-bot targeting, focus mode. */
         private static void migrate(BotConfig c) {
-                if (c.configVersion >= 16) return;
+                if (c.configVersion >= 17) return;
+                if (c.configVersion < 17) c.aimStrafePredict = true;
                 if (c.configVersion < 16) {
                         c.immediateAttack = true;
                         c.classicFreeMovement = true;
@@ -467,7 +469,7 @@ public final class BotConfig {
                         c.pureShaping = true;
                         c.visionRecord = false;
                 }
-                c.configVersion = 16;
+                c.configVersion = 17;
                 c.save();
         }
 

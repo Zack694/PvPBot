@@ -71,7 +71,8 @@ class V1Cfg:
     immediate = True       # v2.3.5 Java default: click the moment the sword is strong-charged + crosshair on hitbox
     imm_thr = 0.87         # stored charge 0.87 -> progress(0.5) > 0.9 = full-power hit
     imm_sprint_wait = 0    # immediate: wait up to N ticks for sprint, only while W is held
-    free_move = True       # v2.3.5 Java default: the DQN owns movement (no backoff/over-retreat/combo strafe/freeze floor)
+    free_move = True       # v2.3.5 Java default: the DQN owns movement
+    aim_predict = True     # v2.3.6 strafe-reversal + ping aware aim lead (no backoff/over-retreat/combo strafe/freeze floor)
 
 
 BACKOFF_ARC = (7, 8, 2, 8, 7, 8, 6, 7)
@@ -120,6 +121,7 @@ class V1Ctl(LearnerCtl):
         self.v1 = cfg or V1Cfg()
         super().__init__(rng, None)
         self.cfg = self.v1
+        self.tracker.predict = getattr(self.v1, "aim_predict", False)
         self.mem = OppMem()
 
     def reset_episode(self):

@@ -132,7 +132,7 @@ public final class PvpBot {
          *  A saved model with a mismatched architecture (older mod version) is
          *  rejected so the new, bigger brain always loads. */
         /** v2.3: bump when the bundled v1 brain must replace on-device v1 brains. */
-        private static final int V1_BRAIN_EPOCH = 3;
+        private static final int V1_BRAIN_EPOCH = 4;
 
         /**
          * v2.3 ONE-TIME v1 UPGRADE. Until v2.3.1 a bot click never counted as a

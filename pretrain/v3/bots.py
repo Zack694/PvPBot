@@ -11,6 +11,8 @@ ScriptedCtl — a randomized human-like opponent (aim skill, click discipline,
 """
 import math
 
+import numpy as np
+
 from physics import wrap, ray_hits, REACH
 
 MOVE_VEC = {0: (0, 0), 1: (1, 0), 2: (-1, 0), 3: (0, -1), 4: (0, 1),
@@ -41,6 +43,11 @@ class Tracker:
         u = rng.uniform
         self.learner = learner
         self.vs = (0.0, 0.0)
+        self.predict = False      # v2.3.6 aim prediction (strafe-reversal + ping aware)
+        self.ping_ticks = 0
+        self.lat_sign = 0
+        self.streak = 0
+        self.hold_ema = 10.0
         if learner:
             # v2.3 mod aim pipeline: smoothed-velocity lead x (1 - 0.6*aw), capped
             # at min(0.3, 0.05 + 0.1*d); per-tick fraction capped at 0.92 - 0.27*aw
@@ -78,7 +85,12 @@ class Tracker:
         d = math.hypot(view.x - me.x, view.z - me.z)
         if self.learner:
             self.vs = (self.vs[0] + 0.35 * (vel[0] - self.vs[0]), self.vs[1] + 0.35 * (vel[1] - self.vs[1]))
-            lx, lz = self.vs[0] * self.lead, self.vs[1] * self.lead
+            lead = self.lead
+            if self.predict:
+                lead, k = self.prediction(me, view, d)
+                lx, lz = self.vs[0] * lead * k, self.vs[1] * lead * k
+            else:
+                lx, lz = self.vs[0] * lead, self.vs[1] * lead
             cap = min(0.30, 0.05 + 0.10 * max(0.8, d))
         else:
             lx, lz = vel[0] * self.lead, vel[1] * self.lead
@@ -99,6 +111,25 @@ class Tracker:
         if abs(dp) < self.deadzone:
             dp = 0.0
         return dy, dp
+
+    def prediction(self, me, view, d):
+        """Lead ticks (+ ping) and a reversal damping factor from their strafe rhythm."""
+        if d < 1e-4:
+            return self.lead, 1.0
+        ux, uz = (view.x - me.x) / d, (view.z - me.z) / d
+        lat = self.vs[0] * uz - self.vs[1] * ux
+        sg = 1 if lat > 0.04 else (-1 if lat < -0.04 else 0)
+        if sg != 0 and sg == self.lat_sign:
+            self.streak += 1
+        else:
+            if self.lat_sign != 0 and self.streak >= 2:
+                self.hold_ema += 0.25 * (self.streak - self.hold_ema)
+            self.streak = 1 if sg != 0 else 0
+            self.lat_sign = sg
+        # the longer they have held this side vs their usual hold, the likelier a flip
+        ratio = self.streak / max(2.0, self.hold_ema)
+        k = max(0.2, min(1.0, 1.0 - (ratio - 0.6) / 0.8))
+        return self.lead + min(3.0, self.ping_ticks * 0.5), k
 
     def shape(self, dy, dp):
         mag = math.hypot(dy, dp)
@@ -168,6 +199,7 @@ class LearnerCfg:
     jump_discipline = True    # jumps only for jump resets, timed crits or long chases
     crit_gate = True          # own crit jump: no W in the air, click on the descent
     combo_orbit = True        # after landing a hit: WA/WD orbit instead of straight W
+    aim_predict = True        # v2.3.6 strafe-reversal + ping aware aim lead
     immediate = False         # no band roll / gate / sprint wait: click at strong charge
     imm_thr = 0.87
 
@@ -179,6 +211,7 @@ class LearnerCtl:
         self.rng = rng
         self.cfg = cfg or LearnerCfg()
         self.tracker = Tracker(rng, learner=True)
+        self.tracker.predict = getattr(self.cfg, "aim_predict", False)
         self.reset_episode()
 
     def reset_episode(self):
@@ -484,6 +517,15 @@ class ScriptedCtl:
             "flip": (int(rng.integers(2, 8)), int(rng.integers(8, 40))),
             "sprint": rng.random() < 0.92,
         }
+        # v2.3.6 HUMAN LAYER (every opponent): adapts to you, tilts, makes mistakes
+        self.h = {
+            "adapt": u(0.0, 1.0),            # how strongly they counter your habits
+            "tilt": float(rng.choice([-1.0, 0.0, 1.0])) * u(0.3, 1.0),  # +: rushes when losing, -: panics/kites
+            "mistake": u(0.0, 0.012),        # per-tick chance of a brain-lag / misaim lapse
+            "feint": u(0.0, 0.35),           # chance to fake a step-in when the sword is not ready
+            "react_jit": int(rng.integers(0, 3)),
+            "strafe_sigma": u(0.3, 1.0),     # lognormal spread of strafe holds (heavy tail)
+        }
         if preset == "practice":
             self.skill = u(0.85, 1.0)
             self.p.update(react=1, thr_lo=u(0.9, 0.97), thr_w=0.03, spam=False, wtap=u(0.3, 0.8),
@@ -507,6 +549,11 @@ class ScriptedCtl:
             self.skill = u(0.8, 1.0)
             self.p.update(react=int(rng.integers(1, 3)), pcrit=True, thr_lo=u(0.85, 0.94), thr_w=0.04, spam=False,
                           jreset=0.0, crit=u(0.0, 0.2), wtap=u(0.2, 0.6), styles=[0.7, 0.2, 0.05, 0.0, 0.05])
+        elif preset == "human":
+            # fully randomized + strong adaptation: the hardest to predict
+            self.skill = u(0.6, 1.0)
+            self.h.update(adapt=u(0.6, 1.0), mistake=u(0.002, 0.01), feint=u(0.1, 0.4))
+            self.p.update(styles=rng.dirichlet([0.6] * len(self.STYLES)))
         elif preset == "combo":
             # keeps you in a combo: rush, short w-taps after every hit, jump resets
             self.skill = u(0.85, 1.0)
@@ -535,6 +582,12 @@ class ScriptedCtl:
         self.cur = (1, 0, False, True, False)
         self.sneak_until = -1
         self.hurt_tick = -100
+        self.lapse_until = -1
+        self.lapse_kind = 0
+        self.feint_until = -1
+        self.learner_radial = 0.0     # EMA of YOUR radial speed (+ = coming at them)
+        self.learner_air = 0.0        # EMA of how often you are airborne
+        self.my_hp_start = 20.0
 
     def _roll_thr(self):
         return min(1.0, self.p["thr_lo"] + self.rng.random() * self.p["thr_w"])
@@ -567,7 +620,30 @@ class ScriptedCtl:
         if t >= self.flip_at:
             self.strafe = -self.strafe
             lo, hi = p["flip"]
-            self.flip_at = t + int(rng.integers(lo, hi + 1))
+            med = (lo + hi) / 2.0
+            hold = int(max(2, min(80, med * float(np.exp(rng.normal(0, self.h["strafe_sigma"]))))))
+            self.flip_at = t + hold
+
+        # ---- v2.3.6 read YOU and adapt (humans counter habits)
+        vx, vz = view_vel
+        if dh > 1e-4:
+            radial = (vx * (me.x - view.x) + vz * (me.z - view.z)) / dh   # + = you approach
+            self.learner_radial += 0.05 * (radial - self.learner_radial)
+        self.learner_air += 0.03 * ((0.0 if view.on_ground else 1.0) - self.learner_air)
+        ad = self.h["adapt"]
+        if ad > 0 and t % 20 == 0 and rng.random() < ad:
+            if self.learner_radial < -0.05:
+                self.plan, self.plan_until = "rush", t + 30            # you back off -> they press
+            elif self.learner_radial > 0.12:
+                self.plan, self.plan_until = ("kite" if rng.random() < 0.5 else "circle"), t + 30
+            elif self.learner_air > 0.45:
+                self.plan, self.plan_until = "pocket", t + 30          # you hop -> they space + punish
+        # tilt: losing the HP race changes how they play
+        hp_gap = view.hp - me.hp                                      # + = they are losing
+        tilt = self.h["tilt"]
+        if tilt != 0 and hp_gap > 4 and t % 20 == 10 and rng.random() < abs(tilt):
+            self.plan = "rush" if tilt > 0 else "kite"
+            self.plan_until = t + 40
 
         fwd, right = 1, 0
         if self.plan == "rush":
@@ -590,6 +666,20 @@ class ScriptedCtl:
         if pcrit_air:
             fwd = 0   # no W in the air: sprint drops, so the descending hit is a crit
             me.sprinting = False
+        # feint: step in while the sword is not ready, then pull back
+        if self.feint_until < t and me.charge() < 0.55 and 3.2 < dh < 4.5 and rng.random() < self.h["feint"] * 0.05:
+            self.feint_until = t + int(rng.integers(4, 9))
+        if t <= self.feint_until:
+            fwd = 1 if self.feint_until - t > 2 else -1
+        # lapses: freeze / forget strafing / look away for a moment
+        if self.lapse_until < t and rng.random() < self.h["mistake"]:
+            self.lapse_until = t + int(rng.integers(3, 10))
+            self.lapse_kind = int(rng.integers(0, 3))
+        lapse = t <= self.lapse_until
+        if lapse and self.lapse_kind == 0:
+            fwd, right = 0, 0
+        elif lapse and self.lapse_kind == 1:
+            right = 0
         if dh < 1.0:
             fwd = -1
         if t < self.tap_until:
@@ -617,11 +707,14 @@ class ScriptedCtl:
         sprint_key = p["sprint"] and not self.crit_mode
         intent = (fwd, right, jump, sprint_key, sneak)
         # reaction delay
-        self.queue.append((t + p["react"], intent))
+        self.queue.append((t + max(0, p["react"] + int(rng.integers(-self.h["react_jit"], self.h["react_jit"] + 1))), intent))
         while self.queue and self.queue[0][0] <= t:
             self.cur = self.queue.pop(0)[1]
 
         dy, dp = self.tracker.desired(me, view, view_vel, t)
+        if lapse and self.lapse_kind == 2:
+            dy += float(rng.normal(0, 14.0))     # misaim burst
+            dp += float(rng.normal(0, 6.0))
         aim = self.tracker.shape(dy, dp)
 
         # clicks

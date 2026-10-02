@@ -406,6 +406,8 @@ public final class PvpBotConfigScreen extends Screen {
                 slider("Turn cap", "°/tick", 5f, 180f, 0, tipOf(BotTooltips.TURN_CAP), c -> c.aimMaxTurnDeg, (c, v) -> c.aimMaxTurnDeg = v);
                 slider("Micro noise", "°", 0f, 1f, 2, tipOf(BotTooltips.AIM_NOISE), c -> c.aimNoiseDeg, (c, v) -> c.aimNoiseDeg = v);
                 islider("Lead", "ticks", 0, 6, tipOf(BotTooltips.AIM_LEAD), c -> c.aimLeadTicks, (c, v) -> c.aimLeadTicks = v);
+                toggle("Aim prediction", "Leads the target a little further by your ping (you see them late) and pulls the lead back when their strafe has lasted longer than their usual rhythm, because a direction change is due. Both brains.",
+                                c -> c.aimStrafePredict, (c, v) -> c.aimStrafePredict = v);
                 toggle("Head priority", "Wander inside the head zone (chin to crown) instead of the whole body.",
                                 c -> c.aimHeadPriority, (c, v) -> c.aimHeadPriority = v);
                 toggle("Threaded 120 Hz aim", "Aim is computed on its own 120 Hz thread and injected every frame (smoothest). Off = per-frame aim.",

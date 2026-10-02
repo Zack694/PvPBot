@@ -121,6 +121,11 @@ class Match:
                 self.b = Side(None, LearnerCtl(rng, self.lcfg), True, lag_b)
         else:
             self.b = Side(None, ScriptedCtl(rng, preset), False, lag_b)
+        # v2.3.6: the learner's aim knows its own latency (ping-aware prediction)
+        for side in (self.a, self.b):
+            tr = getattr(side.ctl, "tracker", None)
+            if tr is not None:
+                tr.ping_ticks = side.lag
         self.result = None
         self.t = 0
         self.recorder = None      # parity-fixture hook: list receiving ops for side a

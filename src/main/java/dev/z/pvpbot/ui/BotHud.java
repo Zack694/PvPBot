@@ -324,7 +324,13 @@ public final class BotHud {
                                                 case "MISS" -> RED;
                                                 default -> DARKRED;
                                         };
-                                        String s = e.kind.equals("MISS") ? "MISS" : String.format(Locale.ROOT, "%s %s%.1f", e.kind, e.amount < 0 ? "" : "-", Math.abs(e.amount));
+                                        // v2.3.6: "HIT 1.9 dmg  +0.38" — the damage dealt and the
+                                        // learning reward it paid (the old "HIT -0.9" showed the
+                                        // opponent's HP change and looked like a penalty)
+                                        String s = e.kind.equals("MISS")
+                                                        ? String.format(Locale.ROOT, "MISS  %+.2f", e.reward)
+                                                        : String.format(Locale.ROOT, "%s %s%.1f dmg  %+.2f", e.kind,
+                                                                        e.estimated ? "~" : "", Math.abs(e.amount), e.reward);
                                         ctx.drawText(tr, Text.literal(s), 0, i * 10, col, true);
                                         i++;
                                 }

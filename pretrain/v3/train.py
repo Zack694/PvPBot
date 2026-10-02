@@ -41,14 +41,15 @@ from replay import Replay  # noqa: E402
 # v2.3.2 adaptive curriculum: base weights, scaled up for opponent types the
 # brain currently loses to (per-actor win-rate EMA)
 CURRICULUM = {None: 3.0, "practice": 2.0, "crit": 1.0, "critpro": 1.5, "combo": 1.5, "kiter": 1.0, "jitter": 1.0,
-              "outspace": 1.5, "pcrit": 1.5}
+              "outspace": 1.5, "pcrit": 1.5, "human": 3.0}
 PRESETS = list(CURRICULUM.keys())
 BENCH = [("scripted", None, 101), ("scripted", None, 202), ("scripted", "practice", 303),
          ("scripted", "practice", 404), ("scripted", "crit", 505), ("scripted", "kiter", 606),
          ("scripted", "jitter", 707), ("scripted", None, 808),
          ("scripted", "critpro", 909), ("scripted", "combo", 1010),
-         ("scripted", "outspace", 1111), ("scripted", "pcrit", 1212)]
-BENCH_SIG = "v2.3.3-12"
+         ("scripted", "outspace", 1111), ("scripted", "pcrit", 1212),
+         ("scripted", "human", 1313), ("scripted", "human", 1414)]
+BENCH_SIG = "v2.3.6-14h"
 
 
 def default_cfg():
@@ -445,6 +446,26 @@ def main():
     args = ap.parse_args()
     run = os.path.abspath(args.run)
     os.makedirs(run, exist_ok=True)
+    # v2.3.6 single-run lock: a second trainer on the same run dir exits at once
+    # (overlapping runs overwrote each other's checkpoints and replay)
+    lock = os.path.join(run, "train.lock")
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+    except FileExistsError:
+        try:
+            other = int(open(lock).read().strip() or "0")
+            os.kill(other, 0)
+            print(f"[lock] run already in progress (pid {other}) — exiting", flush=True)
+            return
+        except (ProcessLookupError, ValueError):
+            os.remove(lock)
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+    import atexit
+    atexit.register(lambda: os.path.exists(lock) and int(open(lock).read() or 0) == os.getpid() and os.remove(lock))
     league_dir = os.path.join(run, "league")
     os.makedirs(league_dir, exist_ok=True)
     cfg = default_cfg()

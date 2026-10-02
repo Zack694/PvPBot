@@ -21,7 +21,9 @@ public final class HitWatcher {
         public static final class TradeEvent {
                 public final long tick;
                 public final String kind;   // HIT, CRIT, MISS, TAKEN
-                public final float amount;
+                public float amount;        // HP change: + = damage dealt, - = damage taken
+                public float reward;        // v2.3.6: learning reward this event paid
+                public boolean estimated;   // v2.3.6: damage estimated (server hides health)
                 public TradeEvent(long tick, String kind, float amount) {
                         this.tick = tick; this.kind = kind; this.amount = amount;
                 }
@@ -149,14 +151,18 @@ public final class HitWatcher {
                         comboDealt = 0;
                         timesTaken++;
                         dmgTaken += taken;
-                        pendingReward -= cfg.humanize ? 0.25f * taken : 0.25f * taken;
+                        float rBeforeT = pendingReward;
+                        pendingReward -= 0.25f * taken;
                         // combo punishment grows while being comboed
                         if (comboTaken > 2) pendingReward -= 0.04f;
+                        float takenReward = pendingReward - rBeforeT;
                         boolean theirCrit = !target.isOnGround() && TargetMotion.of(target).y < 0;
                         float theirSpeed = (float) Math.sqrt(TargetMotion.of(target).x * TargetMotion.of(target).x + TargetMotion.of(target).z * TargetMotion.of(target).z);
                         Vec3dToSelf(self, target);
                         opp.onTheirHitMe(theirCrit, theirSpeed, velTowardMe);
-                        log.addFirst(new TradeEvent(tick, "TAKEN", -taken));
+                        TradeEvent tev = new TradeEvent(tick, "TAKEN", -taken);
+                        tev.reward = takenReward;
+                        log.addFirst(tev);
                 } else {
                         // keep comboTaken alive only during active pressure
                         if (tick - lastTakenHitTick > 40) comboTaken = 0;
@@ -197,9 +203,18 @@ public final class HitWatcher {
                                                 && lastMyHitTick >= attackInFlightTick;
                                 if ((myHit || attributeUnclaimedHits) && sameHit) {
                                         // v2.3: the second half (health after hurt, or vice
-                                        // versa) of a hit already counted — damage only
-                                        dmgDealt += dealt;
-                                        pendingReward += 0.2f * dealt;
+                                        // versa) of a hit already counted — damage only.
+                                        // v2.3.6: the real HP drop REPLACES the estimate.
+                                        float corr = dealt - provisionalEst;
+                                        if (dealt <= 0f) corr = 0f;
+                                        dmgDealt += corr;
+                                        pendingReward += 0.2f * corr;
+                                        if (lastHitEvent != null && dealt > 0f) {
+                                                lastHitEvent.amount = dealt;
+                                                lastHitEvent.reward += 0.2f * corr;
+                                                lastHitEvent.estimated = false;
+                                        }
+                                        if (dealt > 0f) provisionalEst = 0f;
                                 } else if (myHit || attributeUnclaimedHits) {
                                         boolean crit = myHit
                                                         ? attackWasFalling && !attackWasSprinting
@@ -208,10 +223,23 @@ public final class HitWatcher {
                                         comboDealt++;
                                         comboTaken = 0;
                                         hitsLanded++;
+                                        // v2.3.6 HIDDEN-HEALTH FIX — many PvP servers hide other
+                                        // players' health (it never changes client-side), so every
+                                        // hit read 0.0 damage and paid a flat +0.05. When the hurt
+                                        // flash arrives without an HP drop the damage is ESTIMATED
+                                        // from vanilla's formula (our attack damage x charge curve
+                                        // x crit, minus their visible armor); a real HP drop within
+                                        // 4 ticks replaces the estimate.
+                                        float rBefore = pendingReward;
+                                        boolean est = false;
+                                        if (dealt <= 0f && myHit) {
+                                                dealt = estimateDamage(self, target, attackWasFalling && !attackWasSprinting);
+                                                provisionalEst = dealt;
+                                                est = true;
+                                        } else {
+                                                provisionalEst = 0f;
+                                        }
                                         dmgDealt += dealt;
-                                        // damage-proportional reward; a hurt-flash-only contact
-                                        // (custom bots that knock back without HP changes) still
-                                        // counts as a landed hit and pays a small flat signal
                                         pendingReward += dealt > 0f ? 0.2f * dealt : 0.05f;
                                         if (crit) {
                                                 critsLanded++;
@@ -222,7 +250,11 @@ public final class HitWatcher {
                                         }
                                         if (comboDealt > 2) pendingReward += 0.04f;
                                         opp.onMyHitThem(self.distanceTo(target));
-                                        log.addFirst(new TradeEvent(tick, crit ? "CRIT" : "HIT", dealt));
+                                        TradeEvent ev = new TradeEvent(tick, crit ? "CRIT" : "HIT", dealt);
+                                        ev.reward = pendingReward - rBefore;
+                                        ev.estimated = est;
+                                        lastHitEvent = ev;
+                                        log.addFirst(ev);
                                 }
                         }
                         lastTargetHurtTime = tHurt;
@@ -241,7 +273,9 @@ public final class HitWatcher {
                                 if (tick - lastMyHitTick > 10 || lastMyHitTick < attackInFlightTick) {
                                         whiffs++;
                                         pendingReward -= 0.02f;
-                                        log.addFirst(new TradeEvent(tick, "MISS", 0f));
+                                        TradeEvent mev = new TradeEvent(tick, "MISS", 0f);
+                                        mev.reward = -0.02f;
+                                        log.addFirst(mev);
                                 }
                                 attackInFlight = false;
                         }
@@ -255,6 +289,28 @@ public final class HitWatcher {
                 pendingReward += 0.001f;
 
                 while (log.size() > 8) log.removeLast();
+        }
+
+        private float provisionalEst = 0f;
+        private TradeEvent lastHitEvent = null;
+
+        /** v2.3.6: vanilla melee damage estimate (used when the server hides health). */
+        static float estimateDamage(ClientPlayerEntity self, LivingEntity target, boolean crit) {
+                try {
+                        double base = self.getAttributeValue(net.minecraft.entity.attribute.EntityAttributes.ATTACK_DAMAGE);
+                        // the attack already reset the meter; the swing used ~full charge
+                        float p = 1f;
+                        double dmg = base * (0.2 + p * p * 0.8);
+                        if (crit) dmg *= 1.5;
+                        double armor = target.getArmor();
+                        double tough = target.getAttributeValue(net.minecraft.entity.attribute.EntityAttributes.ARMOR_TOUGHNESS);
+                        double f = 2.0 + tough / 4.0;
+                        double g = Math.min(20.0, Math.max(armor * 0.2, armor - dmg / f));
+                        dmg = dmg * (1.0 - g / 25.0);
+                        return (float) Math.max(0.0, Math.min(20.0, dmg));
+                } catch (Throwable t) {
+                        return 1.5f;
+                }
         }
 
         private float velTowardMe;

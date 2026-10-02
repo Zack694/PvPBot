@@ -1,5 +1,8 @@
 package dev.z.pvpbot.bot;
 
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.network.PlayerListEntry;
+
 import dev.z.pvpbot.ml.NeuralNet;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.LivingEntity;
@@ -245,6 +248,36 @@ public final class AimController {
          * instantaneous acceleration is also EMA-smoothed (0.35 alpha) so a
          * single weird tick can no longer fling the lead point sideways.
          */
+        // v2.3.6 strafe-rhythm prediction state (tick-gated)
+        private int latSign = 0, latStreak = 0;
+        private float holdEma = 10f, reversalK = 1f, pingTicks = 0f;
+
+        private void notePrediction(ClientPlayerEntity self, LivingEntity t) {
+                Vec3d v = TargetMotion.smoothed(t);
+                double dx = t.getX() - self.getX(), dz = t.getZ() - self.getZ();
+                double d = Math.sqrt(dx * dx + dz * dz);
+                if (d < 1e-4) return;
+                double lat = v.x * (dz / d) - v.z * (dx / d);
+                int sg = lat > 0.04 ? 1 : (lat < -0.04 ? -1 : 0);
+                if (sg != 0 && sg == latSign) {
+                        latStreak++;
+                } else {
+                        if (latSign != 0 && latStreak >= 2) holdEma += 0.25f * (latStreak - holdEma);
+                        latStreak = sg != 0 ? 1 : 0;
+                        latSign = sg;
+                }
+                float ratio = latStreak / Math.max(2f, holdEma);
+                reversalK = MathHelper.clamp(1f - (ratio - 0.6f) / 0.8f, 0.2f, 1f);
+                try {
+                        MinecraftClient mcl = MinecraftClient.getInstance();
+                        PlayerListEntry e = mcl.getNetworkHandler() == null ? null
+                                        : mcl.getNetworkHandler().getPlayerListEntry(self.getUuid());
+                        pingTicks = e == null ? 0f : MathHelper.clamp(e.getLatency() / 50f, 0f, 10f);
+                } catch (Throwable ignored) {
+                        pingTicks = 0f;
+                }
+        }
+
         private void noteTargetMotion(LivingEntity t, long tick) {
                 if (tick == lastMotionTick) return; // same game tick — keep the estimate
                 lastMotionTick = tick;
@@ -302,6 +335,18 @@ public final class AimController {
                 // the anti-wobble dial scales it down to 40% at max.
                 Vec3d v = TargetMotion.smoothed(t);
                 float lf = lead * (1f - 0.6f * aw);
+                // v2.3.6 AIM PREDICTION — lead a little further by our own ping
+                // (we see them ~ping/2 late) and pull the lead back when their
+                // strafe has lasted longer than their usual hold (a flip is due,
+                // leading the old direction would aim at air).
+                boolean predictOn = true;
+                try {
+                        predictOn = dev.z.pvpbot.PvpBot.get().config().aimStrafePredict;
+                } catch (Throwable ignored) {
+                }
+                if (predictOn) {
+                        lf = (lf + Math.min(3f, pingTicks * 0.5f)) * reversalK;
+                }
                 double lx = v.x * lf, lz = v.z * lf;
                 double mag = Math.sqrt(lx * lx + lz * lz);
                 double cap = Math.min(0.30, 0.05 + 0.10 * Math.max(0.8, myDist));
@@ -422,6 +467,7 @@ public final class AimController {
                 float wanderScale = 1f - 0.85f * aw;
                 // features describe the opponent's motion (what a human reads)
                 Vec3d tgtVel = TargetMotion.smoothed(target);
+                if (tick != lastMotionTick) notePrediction(self, target); // v2.3.6
                 noteTargetMotion(target, tick); // v2.2.0: tick-gated + EMA'd accel
                 float yawRad = (float) Math.toRadians(self.getYaw());
                 float fx = -MathHelper.sin(yawRad), fz = MathHelper.cos(yawRad);
@@ -638,6 +684,9 @@ public final class AimController {
                 lastTimeSec = -1f;
                 lastMotionTick = Long.MIN_VALUE;
                 lastStrafeTick = Long.MIN_VALUE;
+                latSign = 0;
+                latStreak = 0;
+                reversalK = 1f;
                 accEmaX = 0f;
                 accEmaZ = 0f;
                 velHistIdx = 0;
