@@ -320,6 +320,21 @@ public final class AimController {
                 return new Vec3d(t.getX() + lx, t.getY() + vlead, t.getZ() + lz);
         }
 
+        /**
+         * v2.3.5: raw yaw/pitch error (deg) from my view to the final aim point,
+         * with NO side effects (no smoothing state, no label queue). Used for the
+         * pure brain's aim labels so it never disturbs the 120 Hz tracker.
+         */
+        public float[] rawErrorDeg(ClientPlayerEntity self, LivingEntity target, long tick, OpponentMemory opp) {
+                Vec3d ap = finalAimPoint(self, target, tick, 1f - 0.85f * antiWobble(), opp);
+                double adx = ap.x - self.getX(), adz = ap.z - self.getZ();
+                float adist = (float) Math.sqrt(adx * adx + adz * adz);
+                float yawErr = MathHelper.wrapDegrees((float) Math.toDegrees(Math.atan2(-adx, adz)) - self.getYaw());
+                float dy = (float) (ap.y - self.getEyePos().y);
+                float pitchErr = MathHelper.wrapDegrees((float) Math.toDegrees(Math.atan2(-dy, Math.max(0.1f, adist))) - self.getPitch());
+                return new float[]{yawErr, pitchErr};
+        }
+
         /** @return desired yaw/pitch delta in degrees this tick (raw — humanizer shapes it) */
         public float[] aimStep(ClientPlayerEntity self, LivingEntity target, OpponentMemory opp, long tick) {
                 return aimStepTime(self, target, opp, (float) (tick % 200000L) / 20f);
@@ -531,7 +546,11 @@ public final class AimController {
                 // computed a clamped netYaw but then used the unclamped value, so a
                 // saturated/stale prediction could push ±45° of wrong-side yaw).
                 // Small errors (on the body) allow only ~2° of net influence.
-                float netLimit = 2f + 10f * MathHelper.clamp((angErr - 5f) / 20f, 0f, 1f);
+                // v2.3.5: ZERO net authority while the crosshair is near the body
+                // (< 6 deg): the online-trained aim net's guess was a +/-2 deg
+                // tick-to-tick noise source right where precision matters — the
+                // remaining "wobble". It only helps on big turns now.
+                float netLimit = 10f * MathHelper.clamp((angErr - 6f) / 19f, 0f, 1f);
                 // v1.0.9c: the net's PITCH influence is hard-bounded to ±8° —
                 // it trained on the old above-the-head labels and learned an
                 // upward bias; the measured error now owns the vertical axis

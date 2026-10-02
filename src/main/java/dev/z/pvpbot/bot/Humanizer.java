@@ -114,6 +114,9 @@ public final class Humanizer {
 
         /** Smoothed, ease-in-out shaped aim step in degrees (per game tick). */
         public float[] shapeAim(ClientPlayerEntity player, float desiredYawDelta, float desiredPitchDelta) {
+                if (desiredYawDelta == 0f && desiredPitchDelta == 0f) {
+                        return new float[]{0f, 0f}; // v2.3.5: settled stays settled (no noise on zero)
+                }
                 float errMag = (float) Math.sqrt(desiredYawDelta * desiredYawDelta + desiredPitchDelta * desiredPitchDelta);
                 curSmooth = cfg.aimSmoothMin + rng.nextFloat() * (cfg.aimSmoothMax - cfg.aimSmoothMin);
                 float boost = flickBoost(desiredYawDelta, desiredPitchDelta);

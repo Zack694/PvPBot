@@ -68,6 +68,10 @@ class V1Cfg:
     combo_strafe = True
     backoff_on = True
     wtap_on = True
+    immediate = True       # v2.3.5 Java default: click the moment the sword is strong-charged + crosshair on hitbox
+    imm_thr = 0.87         # stored charge 0.87 -> progress(0.5) > 0.9 = full-power hit
+    imm_sprint_wait = 0    # immediate: wait up to N ticks for sprint, only while W is held
+    free_move = True       # v2.3.5 Java default: the DQN owns movement (no backoff/over-retreat/combo strafe/freeze floor)
 
 
 BACKOFF_ARC = (7, 8, 2, 8, 7, 8, 6, 7)
@@ -463,7 +467,8 @@ class V1Ctl(LearnerCtl):
         if self.over_retreat > 0:
             self.over_retreat -= 1
         c = self.v1
-        if c.backoff_on and not self.backoff and dh < c.too_close and t - self.last_backoff_end >= 20:
+        free = c.free_move
+        if c.backoff_on and not free and not self.backoff and dh < c.too_close and t - self.last_backoff_end >= 20:
             self.backoff = True
             self.backoff_start = t
         elif self.backoff and (dh >= c.backoff_release or t - self.backoff_start > max(6, c.backoff_max)):
@@ -491,6 +496,8 @@ class V1Ctl(LearnerCtl):
                 return (2, 7, 8)[self.wtap_var]
         if self.chase:
             return self._intercept(me, view, probes)
+        if free:
+            return a_move
         if a_move in BACK_MOVES and dh < 4.5:
             self.retreat_pressure += 1.0
         if self.retreat_pressure > 10.0 and dh > 1.6:
@@ -605,6 +612,16 @@ class V1Ctl(LearnerCtl):
     def _trigger(self, t, me, view, world, d3, sneak_window):
         c = self.v1
         charge = me.charge(0.0)
+        if c.immediate:
+            if not (charge >= max(c.band_min, c.imm_thr) and t - self.last_any_swing >= 2
+                    and t - self.last_click >= 3 and d3 <= c.click_max_dist):
+                return False
+            if (me.on_ground and not me.sprinting and self.cur_move in (1, 5, 6)
+                    and self.no_sprint < c.imm_sprint_wait):
+                self.no_sprint += 1
+                return False
+            self.no_sprint = 0
+            return self._fire(t, me, view, world, sneak_window)
         band_ok = charge >= c.band_min and (charge <= c.band_max or charge >= 0.999)
         if not (band_ok and t - self.last_any_swing >= 2 and t - self.last_click >= 3 and d3 <= c.click_max_dist):
             return False
@@ -625,6 +642,10 @@ class V1Ctl(LearnerCtl):
         self.no_sprint = 0
         if me.sprinting:
             self.sprint_bypass = False
+        return self._fire(t, me, view, world, sneak_click)
+
+    def _fire(self, t, me, view, world, sneak_click):
+        c = self.v1
         if not on_target(me, view, world):
             return False
         if self.crit_window > 0 and me.vy >= 0:

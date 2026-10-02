@@ -297,8 +297,34 @@ def huber(x, d):
     return torch.where(a <= d, 0.5 * x * x, d * (a - 0.5 * d))
 
 
+V1_NEG = [9, 17, 20, 30, 57, 58, 63]
+V1_SWAP = [(43, 49), (44, 48), (45, 47)]
+
+
+def mirror_batch_v1(b, frac=0.5):
+    n = len(b["R"])
+    k = np.random.random(n) < frac
+    if not k.any():
+        return b
+    out = {key: v.copy() for key, v in b.items()}
+    for key in ("s", "s2"):
+        x = out[key]
+        x[np.ix_(k, V1_NEG)] *= -1.0
+        for i, j in V1_SWAP:
+            xi = x[k, i].copy()
+            x[k, i] = x[k, j]
+            x[k, j] = xi
+    a = out["move"].astype(np.int64) & 0xFF
+    am = (MIRROR_MOVE[a >> 3] << 3) | (a & 7)
+    a[k] = am[k]
+    out["move"] = a.astype(np.int8)
+    return out
+
+
 def train_step_v1(model, target, opt, rb, cfg, beta):
     idx, b, w = rb.sample(cfg["batch"], beta)
+    if cfg.get("mirror", True):
+        b = mirror_batch_v1(b)
     s = torch.from_numpy(b["s"])
     s2 = torch.from_numpy(b["s2"])
     a = torch.from_numpy(b["move"].astype(np.int64))

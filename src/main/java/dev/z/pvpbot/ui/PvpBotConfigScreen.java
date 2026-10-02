@@ -367,6 +367,10 @@ public final class PvpBotConfigScreen extends Screen {
 
                 section("Combat", 0xFFFF9A6B);
                 toggle("TriggerBot", tipOf(BotTooltips.TRIGGERBOT), c -> c.triggerBot, (c, v) -> c.triggerBot = v);
+                toggle("Immediate attack (classic)", "Click the moment the sword is strong-charged (full-power hit) and the crosshair is on the opponent's hitbox. No random band delay and no waiting for sprint. Own crit jumps still wait for the fall. Off = the old randomized band + sprint-hit wait.",
+                                c -> c.immediateAttack, (c, v) -> c.immediateAttack = v);
+                toggle("Free movement (classic)", "The classic brain picks its own moves. Turns off the scripted backoff, over-retreat governor, combo strafe and anti-freeze floor. W-tap, jump reset, wall escape, combo breaker and crit denial still run.",
+                                c -> c.classicFreeMovement, (c, v) -> c.classicFreeMovement = v);
                 slider("Attack band min", "", 0.5f, 1.0f, 2, tipOf(BotTooltips.BAND_MIN), c -> c.attackCooldownMin, (c, v) -> c.attackCooldownMin = v);
                 slider("Attack band max", "", 0.5f, 1.0f, 2, tipOf(BotTooltips.BAND_MAX), c -> c.attackCooldownMax, (c, v) -> c.attackCooldownMax = v);
                 slider("Click range", "blocks", 2.5f, 3.2f, 2, tipOf(BotTooltips.CLICK_MAX_DIST), c -> c.clickMaxDist, (c, v) -> c.clickMaxDist = v);

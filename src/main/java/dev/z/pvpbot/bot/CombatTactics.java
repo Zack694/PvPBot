@@ -570,7 +570,8 @@ public final class CombatTactics {
                 if (adapt != null) {
                         backoffRelease = Math.max(1.8f, Math.min(2.6f, backoffRelease * adapt.spacingMult()));
                 }
-                if (cfg.backoffEnabled) {
+                boolean free = cfg.classicFreeMovement; // v2.3.5: the brain owns the moveset
+                if (cfg.backoffEnabled && !free) {
                         // v2.3: a capped-out backoff can no longer re-arm on the very
                         // next tick (a rusher kept the bot backpedalling forever with
                         // a 1-tick gap every 25 ticks) — 20 ticks of rest first.
@@ -639,6 +640,9 @@ public final class CombatTactics {
                         return interceptMove(self, target);
                 }
 
+                if (free) {
+                        return dqnMove;
+                }
                 // ---- over-retreat enforcement (v1.0.6) — AFTER backoff/wtap so
                 // legitimate S-moves are untouched; counts only the DQN's own
                 // backward drift when we are NOT in a forced retreat.

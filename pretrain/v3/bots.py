@@ -168,6 +168,8 @@ class LearnerCfg:
     jump_discipline = True    # jumps only for jump resets, timed crits or long chases
     crit_gate = True          # own crit jump: no W in the air, click on the descent
     combo_orbit = True        # after landing a hit: WA/WD orbit instead of straight W
+    immediate = False         # no band roll / gate / sprint wait: click at strong charge
+    imm_thr = 0.87
 
 
 class LearnerCtl:
@@ -408,6 +410,21 @@ class LearnerCtl:
         if not (intent and band_ok and t - self.last_any_swing >= 2 and t - self.last_click >= 3
                 and dist3(me, view) <= cfg.click_max_dist):
             return False
+        if getattr(cfg, "immediate", False):
+            if charge < max(cfg.band_min, cfg.imm_thr) and charge < 0.999:
+                return False
+            if cfg.crit_gate and t <= getattr(self, "crit_until", -1) and not me.on_ground and me.vy >= 0:
+                return False
+            if not on_target(me, view, world):
+                return False
+            self.last_any_swing = t
+            self.last_click = t
+            self.last_attack_attempt = t
+            self.attack_in_flight = True
+            self.attack_flight_tick = t
+            self.attack_falling = (not me.on_ground) and me.vy < 0
+            self.attack_sprinting = me.sprinting
+            return True
         if self.next_band < 0:
             band = cfg.band_min + self.rng.random() * max(0.01, cfg.band_max - cfg.band_min)
             band *= self.band_mult

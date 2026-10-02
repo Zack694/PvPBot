@@ -557,7 +557,7 @@ public final class BotController {
                                         // when rendering stalls (frameTick drains them too)
                                 } else if (!cfg.frameAim) {
                                         // legacy 20Hz aim (frame aim runs in frameTick())
-                                        if (cfg.pureMode) {
+                                        if (pureAimOnBudget()) {
                                                 // v2.0 PHASE 2-b: the blended+shaped head/tracker budget IS the aim
                                                 float[] bud = drainAllPureAimBudget();
                                                 actuator.queueLook(bud[0], bud[1]);
@@ -827,7 +827,13 @@ public final class BotController {
                 // output reaches the mouse only after it EARNS execution:
                 // /pvpbot v2 aimhead on AND >= pureAimHeadMinSteps training steps
                 // AND aimLossEma <= pureAimHeadMaxLoss.
-                float[] tracker = aim.aimStep(self, target, memory, tickCounter);
+                // v2.3.5 PURE AIM = THE CLASSIC 120 Hz TRACKER. The 20 Hz pure budget
+                // moved the camera in front-loaded bursts once per tick (a visible
+                // 20 Hz pulse = the "wobble" no anti-wobble value fixed). While the
+                // aim head is benched, pure mode now aims through the exact same
+                // continuous 120 Hz tracker as classic; the tick path below only
+                // produces training labels (side-effect free).
+                float[] tracker = aim.rawErrorDeg(self, target, tickCounter, memory);
                 float maxDeg = Math.max(1f, cfg.pureAimMaxDeg);
                 float trYaw = MathHelper.clamp(tracker[0], -maxDeg, maxDeg);
                 float trPit = MathHelper.clamp(tracker[1], -maxDeg, maxDeg);
@@ -849,7 +855,7 @@ public final class BotController {
                                                 policy.getTrainSteps(), policy.aimLossEma, w * 100f));
                         }
                 }
-                float[] shaped = humanizer.shapeAim(self, rawYaw, rawPit);
+                float[] shaped = pureAimOnBudget() ? humanizer.shapeAim(self, rawYaw, rawPit) : new float[]{0f, 0f};
                 // v2.3: REPLACE the budget, never add. The tracker re-measures the
                 // full remaining error every tick, so the undelivered rest of the
                 // previous budget is already inside this tick's correction —
@@ -1024,8 +1030,13 @@ public final class BotController {
          * the tick's blended aim budget across frames (dt-corrected). Returns
          * null when pure mode is off — callers then use the v1 tracker path.
          */
+        /** v2.3.5: the 20 Hz pure budget only drives the camera once the aim head earned it. */
+        private boolean pureAimOnBudget() {
+                return cfg.pureMode && cfg.pureAimHead && aimHeadPromoted();
+        }
+
         public float[] takePureAimFrame(float dtMs) {
-                if (!cfg.pureMode || !controlling) {
+                if (!pureAimOnBudget() || !controlling) {
                         return null;
                 }
                 float dy, dp;
@@ -1662,6 +1673,13 @@ public final class BotController {
                                 // it opened. The TriggerBot's own gate applies to every click.
                                 paced = charge >= nextBandThreshold
                                                 && humanizer.attackGateAllowed((int) (tickCounter - hits.lastAttackAttemptTick));
+                                // v2.3.5 CLASSIC IMMEDIATE ATTACK: the moment the sword is
+                                // strong-charged (stored 0.87 -> vanilla's 0.9 full-power
+                                // test) and vanilla's crosshair ray is on their hitbox,
+                                // click. No random band roll, no jitter gate.
+                                if (classicImmediate()) {
+                                        paced = charge >= Math.max(cfg.attackCooldownMin, 0.87f) || charge >= 0.999f;
+                                }
                         }
                         if (paced) {
                                 // ---- v1.0.7 SPRINT-HIT GATE + SNEAK-AT-CLICK -------------
@@ -1675,7 +1693,7 @@ public final class BotController {
                                 // deliberate exception: a shift-click is the sneak-hit
                                 // technique the config asks for.
                                 boolean sneakClick = cfg.pureMode ? pureExecSneak : tactics.sneakWindowOpen();
-                                if (cfg.sprintHitOnly && self.isOnGround() && !self.isSprinting()
+                                if (cfg.sprintHitOnly && !classicImmediate() && self.isOnGround() && !self.isSprinting()
                                                 && !sneakClick && !sprintGateBypass) {
                                         // sprint is forced on above — it engages within a tick
                                         // or two; hold fire until then (never sweep).
@@ -1799,6 +1817,11 @@ public final class BotController {
                                 lastReflexJumpTick = tickCounter;
                         }
                 }
+        }
+
+        /** v2.3.5: classic brain clicks without waiting (sim A/B with free movement: 34% -> 46%). */
+        private boolean classicImmediate() {
+                return cfg.immediateAttack && !cfg.pureMode && !noCooldownServer;
         }
 
         private static boolean wtapIsTapMove(int move) {
